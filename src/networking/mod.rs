@@ -4,7 +4,7 @@ mod systems;
 mod transport;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
 pub use self::events::NetworkEvent;
@@ -18,6 +18,8 @@ const DEFAULT_HEARTBEAT_TICK_RATE_SECS: f32 = 2.;
 /// Defines how long the server will wait until it sends
 /// NetworkEvent::Disconnected
 const DEFAULT_IDLE_TIMEOUT_SECS: f32 = 5.;
+
+pub const ETHERNET_MTU: usize = 1500;
 
 #[derive(Resource)]
 pub struct NetworkResource {
@@ -76,6 +78,12 @@ impl Plugin for ServerPlugin {
 pub struct HeartbeatTimer(Timer);
 
 pub struct ClientPlugin;
+
+#[derive(Resource)]
+pub struct ResUdpSocket(pub UdpSocket);
+
+#[derive(Resource)]
+pub struct ResSocketAddr(pub(crate) SocketAddr);
 
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {

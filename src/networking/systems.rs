@@ -1,24 +1,20 @@
 use std::{
-    io,
-    net::{SocketAddr, UdpSocket},
+    io
 };
 
 use bevy::prelude::*;
 use bytes::Bytes;
 
-use crate::networking::HeartbeatTimer;
+use crate::networking::{HeartbeatTimer, ETHERNET_MTU};
+use crate::networking::ResUdpSocket;
+use crate::networking::ResSocketAddr;
 
 use super::{events::NetworkEvent, transport::Transport, NetworkResource};
 
-#[derive(Resource)]
-pub struct ResUdpSocket(UdpSocket);
-
-#[derive(Resource)]
-pub struct ResSocketAddr(SocketAddr);
 
 pub fn client_recv_packet_system(socket: Res<ResUdpSocket>, mut events: EventWriter<NetworkEvent>) {
     loop {
-        let mut buf = [0; 512];
+        let mut buf = [0; ETHERNET_MTU];
         match socket.0.recv_from(&mut buf) {
             Ok((recv_len, address)) => {
                 let payload = Bytes::copy_from_slice(&buf[..recv_len]);
@@ -34,6 +30,7 @@ pub fn client_recv_packet_system(socket: Res<ResUdpSocket>, mut events: EventWri
                 if e.kind() != io::ErrorKind::WouldBlock {
                     events.send(NetworkEvent::RecvError(e));
                 }
+
                 // break loop when no messages are left to read this frame
                 break;
             }
@@ -48,7 +45,7 @@ pub fn server_recv_packet_system(
     mut net: ResMut<NetworkResource>,
 ) {
     loop {
-        let mut buf = [0; 512];
+        let mut buf = [0; ETHERNET_MTU];
         match socket.0.recv_from(&mut buf) {
             Ok((recv_len, address)) => {
                 let payload = Bytes::copy_from_slice(&buf[..recv_len]);
@@ -87,7 +84,7 @@ pub fn send_packet_system(
     let messages = transport.drain_messages_to_send(|_| true);
     for message in messages {
         if let Err(e) = socket.0.send_to(&message.payload, message.destination) {
-            events.send(NetworkEvent::SendError(e, message));
+            events.send(NetworkEvent::SendError(socket.0.peer_addr().unwrap(), e, message));
         }
     }
 }

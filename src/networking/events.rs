@@ -15,5 +15,5 @@ pub enum NetworkEvent {
     // An error occurred while receiving a message
     RecvError(io::Error),
     // An error occurred while sending a message
-    SendError(io::Error, Message),
+    SendError(SocketAddr, io::Error, Message),
 }
