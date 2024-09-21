@@ -1,6 +1,7 @@
 mod networking;
 mod common;
 
+use std::collections::VecDeque;
 use common::*;
 
 use std::net::{SocketAddr, UdpSocket};
@@ -13,19 +14,25 @@ use bevy::utils::HashMap;
 use networking::{ClientPlugin, NetworkEvent, ResSocketAddr, ResUdpSocket};
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use iyes_perf_ui::prelude::*;
+use itertools::Itertools;
+use std::time::{Duration, Instant};
 
 const INVALID_FRAME: u32 = 0;
+
+const INTERP_DELAY_S: f32 = TICK_RATE_HZ + MIN_JITTER_S;
 
 #[derive(Resource, Default)]
 struct WorldStates {
     states: Vec<WorldStateData>,
-    from_index: Option<usize>,
+    interp_started: bool,
+    received_per_sec: VecDeque<f32>,
 }
 
 #[derive(Resource)]
 struct PastClientInputs {
     inputs: Vec<PlayerInput>
 }
+
 
 #[derive(Resource, Default)]
 struct NetIdToEntityId {
@@ -50,6 +57,10 @@ fn main() {
         .expect("could not set socket to be nonblocking");
 
     App::new()
+        .insert_resource(bevy::winit::WinitSettings {
+            focused_mode: bevy::winit::UpdateMode::Continuous,
+            unfocused_mode: bevy::winit::UpdateMode::Continuous,
+        })
         .insert_resource(remote_addr)
         .insert_resource(socket)
         .insert_resource(NetIdToEntityId::default())
@@ -86,10 +97,13 @@ fn main() {
     world_states.future_states.push(ws);
 }*/
 
+
 fn connection_handler(
     mut events: EventReader<NetworkEvent>,
     mut world_states: ResMut<WorldStates>,
+    time: Res<Time<Real>>,
 ) {
+    let mut recv_count = 0;
     for event in events.read() {
         match event {
             NetworkEvent::Message(handle, msg) => {
@@ -100,7 +114,9 @@ fn connection_handler(
                     Ok((packet, _)) => {
                         match packet {
                             ServerToClientPacket::WorldState(ws) => {
+                                recv_count += 1;
                                 world_states.states.push(ws);
+                                world_states.received_per_sec.push_back(time.elapsed_seconds())
                             }
                         }
                     }
@@ -122,6 +138,15 @@ fn connection_handler(
             _ => {}
         }
     }
+    /*if recv_count > 0 {
+        if world_states.received_per_sec.len() > 1 {
+            let recent = world_states.received_per_sec.back().unwrap();
+            let prev = world_states.received_per_sec[world_states.received_per_sec.len() - 2];
+            info!("{} event recvd this frame ({} ms since prev)", recv_count, (recent - prev) * 1000.0);
+        } else {
+            info!("{} event recvd this frame", recv_count);
+        }
+    }*/
 }
 
 fn interpolate_frame(
@@ -196,7 +221,7 @@ impl<'w, 's> SpawnInterpolatedTransformBundleEx for Commands<'w, 's> {
 fn sync_net_ids_if_needed_and_update_score(
     mut commands: &mut Commands,
     ws: &WorldStateData,
-    net_id_query: Query<(Entity, &NetId)>,
+    net_id_query: &Query<(Entity, &NetId)>,
     net_id_map: &mut ResMut<NetIdToEntityId>,
     meshes: &mut Assets<Mesh>,
     score: &mut Score,
@@ -279,65 +304,11 @@ fn setup(
     ));
 }
 
-fn tick_simulation(
-    mut commands: Commands,
-    mut world_states: ResMut<WorldStates>,
-    mut query: Query<(&mut InterpolatedTransform)>,
-    net_id_query: Query<(Entity, &NetId)>,
-    mut net_id_map: ResMut<NetIdToEntityId>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    mut score: ResMut<Score>
+fn apply_world_state(
+    query: &mut Query<&mut InterpolatedTransform>,
+    net_id_map: &mut ResMut<NetIdToEntityId>,
+    to_state: &WorldStateData
 ) {
-    if world_states.states.len() < 3 {
-        return;
-    } else if world_states.states.len() > 6 {
-        // Maintain a buffer of 3
-        let drain_len = 2;
-        world_states.states.drain(0..drain_len);
-        //world_states.from_index = None;
-        warn!("Skipped {} states to stay close to the metal buf {}!", drain_len, world_states.states.len());
-    }
-
-    //warn!("BUFFER IS {} states!", world_states.states.len());
-
-    let mut bootstrap_first_state = None;
-    if let Some(from_index) = world_states.from_index {
-        world_states.states.drain(0..=from_index);
-    } else {
-        world_states.from_index = Some(0);
-        bootstrap_first_state = Some(&world_states.states[0]);
-    }
-
-    if world_states.states.len() < 2 {
-        return;
-    }
-
-    // 0 is 'to' now. this is when we remove entities
-    let to_state = if bootstrap_first_state.is_none() {
-        &world_states.states[0]
-    } else {
-        &world_states.states[1]
-    };
-
-    sync_net_ids_if_needed_and_update_score(&mut commands, to_state, net_id_query, &mut net_id_map, &mut meshes, &mut score, &mut materials);
-
-    if world_states.states.len() < 2 {
-        return;
-    }
-
-    if let Some(bootstrap) = bootstrap_first_state {
-        for net_ent in bootstrap.entities.iter() {
-            if let Some(entity) = net_id_map.net_id_to_entity_id.get(&net_ent.net_id) {
-                if query.contains(*entity) {
-                    let mut interp_transform = query.get_mut(*entity).unwrap();
-                    set_transform_from_net_entity(&net_ent, &mut interp_transform.to);
-                }
-            }
-        }
-    }
-
-    // Set from and to. TODO: see if iterating in component order is faster, it should be
     for net_ent in to_state.entities.iter() {
         if let Some(entity) = net_id_map.net_id_to_entity_id.get(&net_ent.net_id) {
             if query.contains(*entity) {
@@ -347,6 +318,117 @@ fn tick_simulation(
             }
         }
     }
+}
+
+fn tick_simulation(
+    mut commands: Commands,
+    mut world_states: ResMut<WorldStates>,
+    mut query: Query<(&mut InterpolatedTransform)>,
+    net_id_query: Query<(Entity, &NetId)>,
+    mut net_id_map: ResMut<NetIdToEntityId>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut score: ResMut<Score>,
+    time: Res<Time<Real>>,
+) {
+    // Clear old entries from our stats
+    let now_inst = Instant::now();
+    let now = time.elapsed_seconds();
+    while !world_states.received_per_sec.is_empty() {
+        let entry = *world_states.received_per_sec.front().unwrap();
+        if now > entry && now - entry > 1.0 {
+            world_states.received_per_sec.pop_front();
+        }  else {
+            break;
+        }
+    }
+
+    //if !world_states.received_per_sec.is_empty() {
+        //let mut avg_interval: f32 = world_states.received_per_sec.iter().tuple_windows().map(|(&p,&c)| c - p).sum();
+        //avg_interval /= world_states.received_per_sec.len() as f32;
+        //let intervals: Vec<f32> = world_states.received_per_sec.iter().tuple_windows().map(|(&p,&c)| c - p).collect();
+        //warn!("{} PPS, INTERVALS {:?}", world_states.received_per_sec.len(), intervals);
+    //}
+
+    let expected_buffer = 2 + f32::round(INTERP_DELAY_S / TICK_RATE_HZ) as usize;
+
+    if world_states.states.len() < 2 {
+        warn!("STARVED {}!", world_states.states.len());
+        return;
+    } else if world_states.received_per_sec.len() > 0 &&
+        now - world_states.received_per_sec.front().unwrap() < INTERP_DELAY_S {
+        warn!("STARVED INTERP {} vs {}!", now - world_states.received_per_sec.back().unwrap(), INTERP_DELAY_S);
+        return;
+    } else if world_states.states.len() > expected_buffer && world_states.interp_started {
+        let drain_len = world_states.states.len() - expected_buffer;
+        world_states.states.drain(0..drain_len);
+        warn!("Skipped {} states to stay close to the edge buf {}!", drain_len, world_states.states.len());
+    }
+
+    //warn!("BUF {}!", world_states.states.len());
+
+    let mut bootstrap_first_state = false;
+    if world_states.interp_started {
+        world_states.states.remove(0);
+    } else {
+        world_states.interp_started = true;
+        bootstrap_first_state = true;
+    }
+
+    if (bootstrap_first_state && world_states.states.len() < 2) ||
+        world_states.states.is_empty() {
+        return;
+    }
+
+    if bootstrap_first_state {
+        let from_state = &world_states.states[0];
+        update_map_and_apply_world_state(
+            &mut commands,
+            &mut query,
+            &net_id_query,
+            &mut net_id_map,
+            &mut meshes,
+            &mut materials,
+            &mut score,
+            from_state);
+
+        let to_state = &world_states.states[1];
+        update_map_and_apply_world_state(
+            &mut commands,
+            &mut query,
+            &net_id_query,
+            &mut net_id_map,
+            &mut meshes,
+            &mut materials,
+            &mut score,
+            to_state);
+    } else {
+        let to_state = &world_states.states[0];
+        update_map_and_apply_world_state(
+            &mut commands,
+            &mut query,
+            &net_id_query,
+            &mut net_id_map,
+            &mut meshes,
+            &mut materials,
+            &mut score,
+            to_state);
+    }
+
+    //info!("{} us", (Instant::now() - now_inst).as_micros());
+}
+
+fn update_map_and_apply_world_state(
+    commands: &mut Commands,
+    query: &mut Query<&mut InterpolatedTransform>,
+    net_id_query: &Query<(Entity, &NetId)>,
+    net_id_map: &mut ResMut<NetIdToEntityId>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<ColorMaterial>>,
+    score: &mut ResMut<Score>, to_state: &WorldStateData
+) {
+    sync_net_ids_if_needed_and_update_score(commands, to_state, net_id_query, net_id_map, meshes, score, materials);
+    apply_world_state(query, net_id_map, to_state);
 }
 
 fn set_transform_from_net_entity(net_ent: &NetEntity, transform: &mut Transform) {

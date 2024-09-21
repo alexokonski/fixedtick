@@ -72,6 +72,10 @@ fn main() {
     let mut generator = NetIdGenerator::default();
 
     App::new()
+        .insert_resource(bevy::winit::WinitSettings {
+            focused_mode: bevy::winit::UpdateMode::Continuous,
+            unfocused_mode: bevy::winit::UpdateMode::Continuous,
+        })
         .insert_resource(socket)
         .add_plugins(DefaultPlugins)
         .add_plugins(ServerPlugin)
