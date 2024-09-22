@@ -16,9 +16,10 @@ use iyes_perf_ui::prelude::*;
 //use itertools::Itertools;
 //use std::time::{Instant};
 
-const INVALID_FRAME: u32 = 0;
+const MIN_JITTER_S: f64 = (1.0 / 1000.0) * 5.0; // 5 ms
 
-const INTERP_DELAY_S: f32 = TICK_RATE_HZ + MIN_JITTER_S;
+pub const TICK_S: f64 = 1.0 / TICK_RATE_HZ;
+const INTERP_DELAY_S: f64 = TICK_S + MIN_JITTER_S;
 
 #[derive(Resource, Default)]
 struct WorldStates {
@@ -62,9 +63,9 @@ fn main() {
         .insert_resource(remote_addr)
         .insert_resource(socket)
         .insert_resource(NetIdToEntityId::default())
-        .insert_resource(Time::<Fixed>::from_hz(60.0))
+        .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
         .insert_resource(WorldStates::default())
-        .insert_resource(Score(0, NetId(0)))
+        .insert_resource(Score(0))
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(PerfUiPlugin)
         .add_plugins(DefaultPlugins)
@@ -348,13 +349,13 @@ fn tick_simulation(
         //warn!("{} PPS, INTERVALS {:?}", world_states.received_per_sec.len(), intervals);
     //}
 
-    let expected_buffer = 2 + f32::round(INTERP_DELAY_S / TICK_RATE_HZ) as usize;
+    let expected_buffer = 2 + f64::round(INTERP_DELAY_S / TICK_S) as usize;
 
     if world_states.states.len() < 2 {
         warn!("STARVED {}!", world_states.states.len());
         return;
     } else if world_states.received_per_sec.len() > 0 &&
-        now - world_states.received_per_sec.front().unwrap() < INTERP_DELAY_S {
+        now - world_states.received_per_sec.front().unwrap() < INTERP_DELAY_S as f32 {
         warn!("STARVED INTERP {} vs {}!", now - world_states.received_per_sec.back().unwrap(), INTERP_DELAY_S);
         return;
     } else if world_states.states.len() > expected_buffer && world_states.interp_started {

@@ -11,7 +11,6 @@ pub struct Transport {
 
 impl Transport {
     /// Creates a new `Transport`.
-    #[must_use]
     pub fn new() -> Self {
         Self {
             messages: VecDeque::new(),
@@ -26,13 +25,13 @@ impl Transport {
     }
 
     /// Returns true if there are messages enqueued to be sent.
-    #[must_use]
+    #[allow(dead_code)]
     pub fn has_messages(&self) -> bool {
         !self.messages.is_empty()
     }
 
     /// Returns a reference to the owned messages.
-    #[must_use]
+    #[allow(dead_code)]
     pub fn get_messages(&self) -> &VecDeque<Message> {
         &self.messages
     }

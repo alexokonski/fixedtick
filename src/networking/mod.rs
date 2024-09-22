@@ -8,6 +8,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
 pub use self::events::NetworkEvent;
+
+#[allow(unused_imports)]
 pub use self::transport::Transport;
 
 use bevy::prelude::*;

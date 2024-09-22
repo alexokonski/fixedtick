@@ -6,9 +6,7 @@ use bevy::{
 use serde::Serialize;
 use serde::Deserialize;
 
-pub const TICK_RATE_HZ: f32 = 1.0 / 60.0;
-
-pub const MIN_JITTER_S: f32 = (1.0 / 1000.0) * 5.0; // 5 ms
+pub const TICK_RATE_HZ: f64 = 60.0;
 
 // These constants are defined in `Transform` units.
 // Using the default 2D camera they correspond 1:1 with screen pixels.
@@ -145,7 +143,7 @@ impl WallBundle {
 
 // This resource tracks the game's score
 #[derive(Resource)]
-pub struct Score(pub u32, pub NetId);
+pub struct Score(pub u32);
 
 #[derive(Component)]
 pub struct ScoreboardUi;

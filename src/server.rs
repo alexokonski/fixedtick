@@ -6,23 +6,13 @@ use std::{net::UdpSocket, time::Duration};
 use std::ffi::c_void;
 use bevy::utils::HashMap;
 use std::net::SocketAddr;
-use bevy::{
-    log::LogPlugin,
-    math::bounding::{Aabb2d, BoundingCircle, BoundingVolume, IntersectsVolume},
-    prelude::*,
-    sprite::MaterialMesh2dBundle,
-};
-use bevy::asset::AssetContainer;
-use bevy::ecs::system::EntityCommands;
+use bevy::prelude::*;
 use bincode;
 use bincode::config;
-use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit};
 use bincode::error::DecodeError;
 use networking::{NetworkEvent, ServerPlugin, Transport, ResUdpSocket};
 use rand::prelude::*;
-use rand::RngCore;
 use rand_chacha::ChaCha8Rng;
-use rand_chacha::ChaCha8Core;
 use rand_chacha::rand_core::SeedableRng;
 use windows::Win32::Networking::WinSock;
 use std::os::windows::io::AsRawSocket;
@@ -35,7 +25,6 @@ const PADDLE_RIGHT_BOUND: f32 = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.
 
 #[derive(Component)]
 struct NetConnection {
-    addr: SocketAddr,
     paddle_entity: Entity,
     ball_entity: Entity
 }
@@ -55,9 +44,18 @@ struct RandomGen {
     r: ChaCha8Rng
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct NetIdGenerator {
     next: u16
+}
+
+impl Default for NetIdGenerator {
+    fn default() -> Self {
+        NetIdGenerator {
+            // we want 0 to be special
+            next: 1
+        }
+    }
 }
 
 impl NetIdGenerator {
@@ -67,13 +65,6 @@ impl NetIdGenerator {
         NetId(next)
     }
 }
-
-#[derive(Resource, Default)]
-struct EntitiesRemoved {
-    entities: Vec<Entity>
-}
-
-
 fn main() {
     let socket = ResUdpSocket(UdpSocket::bind(LISTEN_ADDRESS).expect("could not bind socket"));
     socket.0
@@ -115,7 +106,7 @@ fn main() {
 
     info!("Server now listening on {}", LISTEN_ADDRESS);
 
-    let mut generator = NetIdGenerator::default();
+    let generator = NetIdGenerator::default();
 
     App::new()
         .insert_resource(bevy::winit::WinitSettings {
@@ -126,8 +117,8 @@ fn main() {
         .insert_resource(rng)
         .add_plugins(DefaultPlugins)
         .add_plugins(ServerPlugin)
-        .insert_resource(Time::<Fixed>::from_hz(60.0))
-        .insert_resource(Score(0, generator.next()))
+        .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
+        .insert_resource(Score(0))
         .insert_resource(ClearColor(BACKGROUND_COLOR))
         .insert_resource(generator)
         .insert_resource(NetConnections::default())
@@ -213,11 +204,9 @@ fn connection_handler(
     mut rng: ResMut<RandomGen>,
     mut net_id_gen: ResMut<NetIdGenerator>,
     mut client_query: Query<(&mut NetConnection, &mut NetInput)>,
-    mut net_id_query: Query<&NetId>,
     mut connections: ResMut<NetConnections>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut world_resource: ResMut<FixedTickWorldResource>
 ) {
     for event in events.read() {
         match event {
@@ -230,7 +219,6 @@ fn connection_handler(
 
                 let id = commands.spawn((
                     NetConnection {
-                        addr: handle.clone(),
                         paddle_entity,
                         ball_entity
                     },
@@ -244,9 +232,7 @@ fn connection_handler(
                     handle,
                     &mut commands,
                     &mut client_query,
-                    &mut net_id_query,
                     &mut connections,
-                    &mut world_resource
                 );
             }
             NetworkEvent::Message(handle, msg) => {
@@ -280,9 +266,7 @@ fn connection_handler(
                     handle,
                     &mut commands,
                     &mut client_query,
-                    &mut net_id_query,
                     &mut connections,
-                    &mut world_resource
                 );
                 error!(
                     "NetworkEvent::SendError (payload [{:?}]): {:?}",
@@ -298,12 +282,10 @@ fn connection_handler(
 
 fn handle_client_disconnected(
     handle: &SocketAddr,
-    mut commands: &mut Commands,
+    commands: &mut Commands,
     client_query:
     &mut Query<(&mut NetConnection, &mut NetInput)>,
-    net_id_query: &mut Query<&NetId>,
     connections: &mut ResMut<NetConnections>,
-    mut world_resource: &mut ResMut<FixedTickWorldResource>
 ) {
     if connections.addr_to_entity.contains_key(handle) {
         let id = connections.addr_to_entity.get(handle).unwrap();
@@ -357,7 +339,7 @@ fn broadcast_world_state(
 
     world.entities.push(NetEntity {
         entity_type: NetEntityType::Score(NetScoreData { score: score.0 }),
-        net_id: score.1
+        net_id: NetId(0) // Singleton entity
     });
 
     //world.entities_removed = world_resource.net_ids_removed_this_frame.clone();
