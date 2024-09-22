@@ -1747,6 +1747,7 @@ dependencies = [
  "rand",
  "rand_chacha",
  "serde",
+ "windows 0.58.0",
 ]
 
 [[package]]

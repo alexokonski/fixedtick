@@ -3,6 +3,7 @@ mod common;
 
 use common::*;
 use std::{net::UdpSocket, time::Duration};
+use std::ffi::c_void;
 use bevy::utils::HashMap;
 use std::net::SocketAddr;
 use bevy::{
@@ -23,6 +24,9 @@ use rand::RngCore;
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::ChaCha8Core;
 use rand_chacha::rand_core::SeedableRng;
+use windows::Win32::Networking::WinSock;
+use std::os::windows::io::AsRawSocket;
+use windows::Win32::Foundation;
 
 pub const LISTEN_ADDRESS: &str = "127.0.0.1:4567";
 
@@ -78,6 +82,34 @@ fn main() {
     socket.0
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("could not set read timeout");
+
+    // We don't want windows to spam us with recv errors if a remote port is closed...
+    // That spams logs and chokes the API, and is useless since we don't know which
+    // client it's from anyways
+    // SEE: https://github.com/mas-bandwidth/yojimbo/blob/b881662d72f21a171639fc6079052ce776cc9b2c/netcode/netcode.c#L519
+    if cfg!(windows) {
+        let win_socket = WinSock::SOCKET(socket.0.as_raw_socket().try_into().unwrap());
+        let value: Foundation::BOOL = false.into();
+        let value_ptr: Option<*const c_void> = Some(&value as *const _ as *const c_void);
+        let mut bytes_returned: u32 = 0;
+        let bytes_returned_ptr: *mut u32 = &mut bytes_returned;
+        let ret_val = unsafe {
+            WinSock::WSAIoctl(
+                win_socket,
+                WinSock::SIO_UDP_CONNRESET,
+                value_ptr,
+                size_of::<bool> as u32,
+                None,
+                0,
+                bytes_returned_ptr,
+                None,
+                None
+            )
+        };
+        if ret_val != 0 {
+            warn!("Failed to disable udp connection reset");
+        }
+    }
 
     let rng = RandomGen{ r: ChaCha8Rng::seed_from_u64(1337) };
 
