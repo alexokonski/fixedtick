@@ -4,18 +4,17 @@ mod common;
 use std::collections::VecDeque;
 use common::*;
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{UdpSocket};
 
-use bevy::ecs::system::EntityCommands;
 use bincode::config;
 use bincode::error::DecodeError;
-use bevy::{log::LogPlugin, prelude::*};
+use bevy::{prelude::*};
 use bevy::utils::HashMap;
 use networking::{ClientPlugin, NetworkEvent, ResSocketAddr, ResUdpSocket};
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use iyes_perf_ui::prelude::*;
-use itertools::Itertools;
-use std::time::{Duration, Instant};
+//use itertools::Itertools;
+//use std::time::{Instant};
 
 const INVALID_FRAME: u32 = 0;
 
@@ -32,7 +31,6 @@ struct WorldStates {
 struct PastClientInputs {
     inputs: Vec<PlayerInput>
 }
-
 
 #[derive(Resource, Default)]
 struct NetIdToEntityId {
@@ -103,7 +101,7 @@ fn connection_handler(
     mut world_states: ResMut<WorldStates>,
     time: Res<Time<Real>>,
 ) {
-    let mut recv_count = 0;
+    //let mut recv_count = 0;
     for event in events.read() {
         match event {
             NetworkEvent::Message(handle, msg) => {
@@ -114,7 +112,7 @@ fn connection_handler(
                     Ok((packet, _)) => {
                         match packet {
                             ServerToClientPacket::WorldState(ws) => {
-                                recv_count += 1;
+                                //recv_count += 1;
                                 world_states.states.push(ws);
                                 world_states.received_per_sec.push_back(time.elapsed_seconds())
                             }
@@ -127,8 +125,8 @@ fn connection_handler(
             }
             NetworkEvent::SendError(handle, err, msg) => {
                 error!(
-                    "NetworkEvent::SendError (payload [{:?}]): {:?}",
-                    msg.payload, err
+                    "NetworkEvent::SendError from {} (payload [{:?}]): {:?}",
+                    handle, msg.payload, err
                 );
             }
             NetworkEvent::RecvError(err) => {
@@ -219,7 +217,7 @@ impl<'w, 's> SpawnInterpolatedTransformBundleEx for Commands<'w, 's> {
 }
 
 fn sync_net_ids_if_needed_and_update_score(
-    mut commands: &mut Commands,
+    commands: &mut Commands,
     ws: &WorldStateData,
     net_id_query: &Query<(Entity, &NetId)>,
     net_id_map: &mut ResMut<NetIdToEntityId>,
@@ -323,7 +321,7 @@ fn apply_world_state(
 fn tick_simulation(
     mut commands: Commands,
     mut world_states: ResMut<WorldStates>,
-    mut query: Query<(&mut InterpolatedTransform)>,
+    mut query: Query<&mut InterpolatedTransform>,
     net_id_query: Query<(Entity, &NetId)>,
     mut net_id_map: ResMut<NetIdToEntityId>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -332,7 +330,7 @@ fn tick_simulation(
     time: Res<Time<Real>>,
 ) {
     // Clear old entries from our stats
-    let now_inst = Instant::now();
+    //let now_inst = Instant::now();
     let now = time.elapsed_seconds();
     while !world_states.received_per_sec.is_empty() {
         let entry = *world_states.received_per_sec.front().unwrap();

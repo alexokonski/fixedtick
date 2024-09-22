@@ -12,7 +12,7 @@ use crate::networking::ResSocketAddr;
 use super::{events::NetworkEvent, transport::Transport, NetworkResource};
 
 pub fn client_recv_packet_system(socket: Res<ResUdpSocket>, mut events: EventWriter<NetworkEvent>) {
-    let mut recv_count = 0;
+    //let mut recv_count = 0;
     loop {
         let mut buf = [0; ETHERNET_MTU];
         match socket.0.recv_from(&mut buf) {
@@ -26,7 +26,7 @@ pub fn client_recv_packet_system(socket: Res<ResUdpSocket>, mut events: EventWri
                 debug!("received payload {:?} from {}", payload, address);
                 //info!("received payload from {}", address);
                 events.send(NetworkEvent::Message(address, payload));
-                recv_count += 1;
+                //recv_count += 1;
             }
             Err(e) => {
                 if e.kind() != io::ErrorKind::WouldBlock {

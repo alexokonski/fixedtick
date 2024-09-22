@@ -1,10 +1,8 @@
 use bevy::{
-    log::LogPlugin,
     math::bounding::{Aabb2d, BoundingCircle, BoundingVolume, IntersectsVolume},
     prelude::*,
     sprite::MaterialMesh2dBundle,
 };
-use bevy::ecs::system::EntityCommands;
 use serde::Serialize;
 use serde::Deserialize;
 
@@ -258,29 +256,15 @@ pub struct FixedTickWorldResource {
     //pub net_ids_removed_this_frame: Vec<NetId>
 }
 
-// This should probably be done via events but quick and dirty for now
-pub fn despawn_net_id_entity(commands: &mut Commands, entity: Entity, net_id: NetId, world_resource: &mut FixedTickWorldResource) {
-    //world_resource.net_ids_removed_this_frame.push(net_id);
-    commands.entity(entity).despawn();
-}
-
-pub fn maybe_despawn_net_id_entity(commands: &mut Commands, entity: Entity, net_id: Option<&NetId>, world_resource: &mut FixedTickWorldResource) {
-    /*if net_id.is_some() {
-        world_resource.net_ids_removed_this_frame.push(*net_id.unwrap());
-    }*/
-    commands.entity(entity).despawn();
-}
-
 pub fn check_for_collisions(
     mut commands: Commands,
     mut score: ResMut<Score>,
     mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
-    collider_query: Query<(Entity, &Transform, Option<&NetId>, Option<&Brick>), With<Collider>>,
+    collider_query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
     mut collision_events: EventWriter<CollisionEvent>,
-    mut world_resource: ResMut<FixedTickWorldResource>
 ) {
     for (mut ball_velocity, ball_transform) in ball_query.iter_mut() {
-        for (collider_entity, collider_transform, collider_net_id, maybe_brick) in &collider_query {
+        for (collider_entity, collider_transform, maybe_brick) in &collider_query {
             let collision = ball_collision(
                 BoundingCircle::new(ball_transform.translation.truncate(), BALL_DIAMETER / 2.),
                 Aabb2d::new(
@@ -295,7 +279,7 @@ pub fn check_for_collisions(
 
                 // Bricks should be despawned and increment the scoreboard on collision
                 if maybe_brick.is_some() {
-                    maybe_despawn_net_id_entity(&mut commands, collider_entity, collider_net_id, &mut world_resource);
+                    commands.entity(collider_entity).despawn();
                     score.0 += 1;
                 }
 

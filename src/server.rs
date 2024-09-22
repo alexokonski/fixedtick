@@ -18,8 +18,16 @@ use bincode::config;
 use bincode::config::{Configuration, Fixint, LittleEndian, NoLimit};
 use bincode::error::DecodeError;
 use networking::{NetworkEvent, ServerPlugin, Transport, ResUdpSocket};
+use rand::prelude::*;
+use rand::RngCore;
+use rand_chacha::ChaCha8Rng;
+use rand_chacha::ChaCha8Core;
+use rand_chacha::rand_core::SeedableRng;
 
 pub const LISTEN_ADDRESS: &str = "127.0.0.1:4567";
+
+const PADDLE_LEFT_BOUND: f32 = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING;
+const PADDLE_RIGHT_BOUND: f32 = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING;
 
 #[derive(Component)]
 struct NetConnection {
@@ -38,6 +46,10 @@ struct NetConnections {
     addr_to_entity: HashMap<SocketAddr, Entity>
 }
 
+#[derive(Resource)]
+struct RandomGen {
+    r: ChaCha8Rng
+}
 
 #[derive(Resource, Default)]
 struct NetIdGenerator {
@@ -67,6 +79,8 @@ fn main() {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("could not set read timeout");
 
+    let rng = RandomGen{ r: ChaCha8Rng::seed_from_u64(1337) };
+
     info!("Server now listening on {}", LISTEN_ADDRESS);
 
     let mut generator = NetIdGenerator::default();
@@ -77,6 +91,7 @@ fn main() {
             unfocused_mode: bevy::winit::UpdateMode::Continuous,
         })
         .insert_resource(socket)
+        .insert_resource(rng)
         .add_plugins(DefaultPlugins)
         .add_plugins(ServerPlugin)
         .insert_resource(Time::<Fixed>::from_hz(60.0))
@@ -163,7 +178,7 @@ fn setup(
 fn connection_handler(
     mut commands: Commands,
     mut events: EventReader<NetworkEvent>,
-    mut transport: ResMut<Transport>,
+    mut rng: ResMut<RandomGen>,
     mut net_id_gen: ResMut<NetIdGenerator>,
     mut client_query: Query<(&mut NetConnection, &mut NetInput)>,
     mut net_id_query: Query<&NetId>,
@@ -176,8 +191,11 @@ fn connection_handler(
         match event {
             NetworkEvent::Connected(handle) => {
                 info!("{}: connected!", handle);
-                let paddle_entity = commands.spawn(PaddleBundle::new(Vec2::new(0.0, PADDLE_Y), net_id_gen.next())).id();
+
+                let paddle_x = rng.r.gen_range(PADDLE_LEFT_BOUND..=PADDLE_RIGHT_BOUND);
+                let paddle_entity = commands.spawn(PaddleBundle::new(Vec2::new(paddle_x, PADDLE_Y), net_id_gen.next())).id();
                 let ball_entity = commands.spawn(BallBundle::new(&mut meshes, &mut materials, BALL_STARTING_POSITION, net_id_gen.next())).id();
+
                 let id = commands.spawn((
                     NetConnection {
                         addr: handle.clone(),
@@ -258,13 +276,8 @@ fn handle_client_disconnected(
     if connections.addr_to_entity.contains_key(handle) {
         let id = connections.addr_to_entity.get(handle).unwrap();
         let conn = client_query.get(*id).unwrap().0;
-
-        if let Ok(net_id) = net_id_query.get(conn.paddle_entity) {
-            despawn_net_id_entity(&mut commands, *id, *net_id, &mut world_resource);
-        }
-        if let Ok(net_id) = net_id_query.get(conn.ball_entity) {
-            despawn_net_id_entity(&mut commands, *id, *net_id, &mut world_resource);
-        }
+        commands.entity(conn.paddle_entity).despawn();
+        commands.entity(conn.ball_entity).despawn();
         commands.entity(*id).despawn();
         connections.addr_to_entity.remove(handle);
     }
@@ -367,10 +380,7 @@ fn move_paddles(
 
         // Update the paddle position,
         // making sure it doesn't cause the paddle to leave the arena
-        let left_bound = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING;
-        let right_bound = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING;
-
-        paddle_transform.translation.x = new_paddle_position.clamp(left_bound, right_bound);
+        paddle_transform.translation.x = new_paddle_position.clamp(PADDLE_LEFT_BOUND, PADDLE_RIGHT_BOUND);
     }
 }
 
