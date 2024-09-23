@@ -2,6 +2,8 @@ use std::{collections::VecDeque, net::SocketAddr};
 
 use super::message::Message;
 
+use bevy::prelude::*;
+
 /// Resource serving as the owner of the queue of messages to be sent. This resource also serves
 /// as the interface for other systems to send messages.
 #[derive(bevy::prelude::Resource)]

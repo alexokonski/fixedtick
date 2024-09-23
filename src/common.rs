@@ -154,15 +154,22 @@ pub enum NetKey {
     Right,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct PlayerInput {
+#[derive(Deserialize, Serialize, Default)]
+pub struct PlayerInputData {
     pub key_mask: u8,
-    pub simulating_frame: u32
+    pub simulating_frame: u32,
+    pub cookie: u32
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+pub struct PingData {
+    pub ping_id: u32,
 }
 
 #[derive(Deserialize, Serialize)]
 pub enum ClientToServerPacket {
-    Input(PlayerInput)
+    Input(PlayerInputData),
+    Ping(PingData)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -212,7 +219,7 @@ pub struct WorldStateData {
 #[derive(Deserialize, Serialize)]
 pub enum ServerToClientPacket {
     WorldState(WorldStateData),
-    //ScoreUpdate(u32)
+    Pong(PingData)
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]

@@ -1,3 +1,4 @@
+use clap::Parser;
 mod networking;
 mod common;
 
@@ -5,20 +6,20 @@ use std::collections::VecDeque;
 use common::*;
 
 use std::net::{UdpSocket};
-
+use std::time;
 use bincode::config;
 use bincode::error::DecodeError;
 use bevy::{prelude::*};
 use bevy::utils::HashMap;
-use networking::{ClientPlugin, NetworkEvent, ResSocketAddr, ResUdpSocket};
+use networking::{ClientPlugin, NetworkEvent, ResSocketAddr, ResUdpSocket, Transport};
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use iyes_perf_ui::prelude::*;
+use crate::networking::{transport, NetworkSystem};
 //use itertools::Itertools;
 //use std::time::{Instant};
 
-const MIN_JITTER_S: f64 = (1.0 / 1000.0) * 5.0; // 5 ms
-
-pub const TICK_S: f64 = 1.0 / TICK_RATE_HZ;
+const MIN_JITTER_S: f64 = (1.0 / 1000.0) * 6.0;
+const TICK_S: f64 = 1.0 / TICK_RATE_HZ;
 const INTERP_DELAY_S: f64 = TICK_S + MIN_JITTER_S;
 
 #[derive(Resource, Default)]
@@ -29,8 +30,16 @@ struct WorldStates {
 }
 
 #[derive(Resource)]
+struct PingState {
+    last_sent_time: f32,
+    next_ping_id: u32,
+    ping_id_to_instance: HashMap<u32, time::Instant>,
+    pongs: Vec<PingData>
+}
+
+#[derive(Resource)]
 struct PastClientInputs {
-    inputs: Vec<PlayerInput>
+    inputs: Vec<PlayerInputData>
 }
 
 #[derive(Resource, Default)]
@@ -44,68 +53,89 @@ struct InterpolatedTransform {
     to: Transform,
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long, default_value = "127.0.0.1")]
+    ip: String,
+
+    #[arg(long, default_value_t = 7001)]
+    port: u16,
+}
+
 fn main() {
-    let remote_addr = ResSocketAddr("127.0.0.1:4567".parse().expect("could not parse addr"));
-    let socket = ResUdpSocket(UdpSocket::bind("127.0.0.1:0").expect("could not bind socket"));
-    //let socket = ResUdpSocket(UdpSocket::default());
-    socket.0
-        .connect(remote_addr.0)
-        .expect("could not connect to server");
-    socket.0
-        .set_nonblocking(true)
-        .expect("could not set socket to be nonblocking");
+    let args = Args::parse();
+    let remote_addr = format!("{}:{}", args.ip, args.port).parse().expect("could not parse addr");
+    let socket = ResUdpSocket::new_client("0.0.0.0:0", remote_addr);
+    //let addr = socket.0.local_addr().unwrap();
+    //println!("local socket addr: {}", addr);
+    let res_addr = ResSocketAddr(remote_addr);
 
     App::new()
         .insert_resource(bevy::winit::WinitSettings {
             focused_mode: bevy::winit::UpdateMode::Continuous,
             unfocused_mode: bevy::winit::UpdateMode::Continuous,
         })
-        .insert_resource(remote_addr)
+        .insert_resource(res_addr)
         .insert_resource(socket)
         .insert_resource(NetIdToEntityId::default())
         .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
         .insert_resource(WorldStates::default())
         .insert_resource(Score(0))
+        .insert_resource(PingState{
+            last_sent_time: 0.0,
+            next_ping_id: 1,
+            ping_id_to_instance: HashMap::default(),
+            pongs: Vec::default()
+        })
+        .insert_resource(FixedTickWorldResource::default())
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(PerfUiPlugin)
         .add_plugins(DefaultPlugins)
-        .add_plugins(ClientPlugin)
+        //.add_plugins(ClientPlugin)
+        .insert_resource(networking::transport::Transport::new())
+        .insert_resource(networking::HeartbeatTimer(Timer::from_seconds(
+            networking::DEFAULT_HEARTBEAT_TICK_RATE_SECS,
+            TimerMode::Repeating,
+        )))
+        .add_event::<networking::events::NetworkEvent>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
-                connection_handler,
+                //connection_handler,
                 interpolate_frame,
             )
         )
         .add_systems (
             FixedUpdate,
             (
-               tick_simulation,
-               update_scoreboard
-            )
+                networking::systems::client_recv_packet_system.in_set(NetworkSystem::Receive),
+                send_input,
+                connection_handler,
+                ping_server,
+                tick_simulation,
+                update_scoreboard,
+                networking::systems::auto_heartbeat_system.in_set(networking::ClientSystem::Heartbeat),
+                networking::systems::send_packet_system.in_set(NetworkSystem::Send),
+            ).chain()
         )
         .run();
 }
 
-/*fn handle_world_state(
-    ws: WorldStateData,
-    net_id_map: &mut NetIdToEntityId,
-    world_states: &mut WorldStates,
-) {
-    world_states.future_states.push(ws);
-}*/
-
-
 fn connection_handler(
     mut events: EventReader<NetworkEvent>,
     mut world_states: ResMut<WorldStates>,
+    mut ping_state: ResMut<PingState>,
+    mut fixed_state: ResMut<FixedTickWorldResource>,
     time: Res<Time<Real>>,
 ) {
+    fixed_state.frame_counter += 1;
+    debug!("({})", fixed_state.frame_counter);
     //let mut recv_count = 0;
     for event in events.read() {
         match event {
-            NetworkEvent::Message(handle, msg) => {
+            NetworkEvent::Message(handle, msg, recv_time) => {
                 let config = config::standard();
                 type ServerToClientResult = Result<(ServerToClientPacket, usize), DecodeError>;
                 let decode_result: ServerToClientResult = bincode::serde::decode_from_slice(msg.as_ref(), config);
@@ -116,6 +146,15 @@ fn connection_handler(
                                 //recv_count += 1;
                                 world_states.states.push(ws);
                                 world_states.received_per_sec.push_back(time.elapsed_seconds())
+                            },
+                            ServerToClientPacket::Pong(pd) => {
+                                //recv_count += 1;
+                                /*debug!("({}) Received pong {} at {:?}, {} event send time",
+                                        fixed_state.frame_counter,
+                                        pd.ping_id,
+                                        time::Instant::now(),
+                                        recv_time.elapsed().as_millis());*/
+                                ping_state.pongs.push(pd);
                             }
                         }
                     }
@@ -319,6 +358,54 @@ fn apply_world_state(
     }
 }
 
+fn send_input (
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    remote_addr: Res<ResSocketAddr>,
+    mut transport: ResMut<Transport>,
+) {
+    let mut input = PlayerInputData::default();
+
+    if keyboard_input.pressed(KeyCode::ArrowLeft) {
+        input.key_mask |= 1 << (NetKey::Left as u8);
+    }
+
+    if keyboard_input.pressed(KeyCode::ArrowRight) {
+        input.key_mask |= 1 << (NetKey::Right as u8);
+    }
+
+    let packet = ClientToServerPacket::Input(input);
+    let mut buf = [0; networking::ETHERNET_MTU];
+    let num_bytes = bincode::serde::encode_into_slice(packet, &mut buf, config::standard()).unwrap();
+    transport.send(remote_addr.0, &buf[..num_bytes]);
+}
+
+fn ping_server(
+    remote_addr: Res<ResSocketAddr>,
+    mut state: ResMut<PingState>,
+    mut transport: ResMut<Transport>,
+    fixed_state: Res<FixedTickWorldResource>,
+    time: Res<Time<Real>>,
+) {
+    let now = time.elapsed_seconds();
+
+    // Send ping every 250ms
+    if now - state.last_sent_time < 0.25 {
+        return;
+    }
+
+    state.last_sent_time = now;
+    let ping_id = state.next_ping_id;
+    let packet = ClientToServerPacket::Ping(PingData { /*client_time: now,*/ ping_id });
+    state.ping_id_to_instance.insert(ping_id, time::Instant::now());
+    state.next_ping_id += 1;
+
+    let mut buf = [0; networking::ETHERNET_MTU];
+    let num_bytes = bincode::serde::encode_into_slice(packet, &mut buf, config::standard()).unwrap();
+    transport.send(remote_addr.0, &buf[..num_bytes]);
+
+    debug!("({})  {} at {:?}", fixed_state.frame_counter, ping_id, time::Instant::now());
+}
+
 fn tick_simulation(
     mut commands: Commands,
     mut world_states: ResMut<WorldStates>,
@@ -328,6 +415,8 @@ fn tick_simulation(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut score: ResMut<Score>,
+    mut ping_state: ResMut<PingState>,
+    fixed_state: Res<FixedTickWorldResource>,
     time: Res<Time<Real>>,
 ) {
     // Clear old entries from our stats
@@ -342,6 +431,12 @@ fn tick_simulation(
         }
     }
 
+    for pong in ping_state.pongs.clone().iter() {
+        let instant = ping_state.ping_id_to_instance.remove(&pong.ping_id).unwrap();
+        debug!("({}) {} ms raw pong for ping {}", fixed_state.frame_counter, instant.elapsed().as_millis(), pong.ping_id);
+    }
+    ping_state.pongs.clear();
+
     //if !world_states.received_per_sec.is_empty() {
         //let mut avg_interval: f32 = world_states.received_per_sec.iter().tuple_windows().map(|(&p,&c)| c - p).sum();
         //avg_interval /= world_states.received_per_sec.len() as f32;
@@ -349,12 +444,24 @@ fn tick_simulation(
         //warn!("{} PPS, INTERVALS {:?}", world_states.received_per_sec.len(), intervals);
     //}
 
-    let expected_buffer = 2 + f64::round(INTERP_DELAY_S / TICK_S) as usize;
 
     if world_states.states.len() < 2 {
-        warn!("STARVED {}!", world_states.states.len());
+        debug!("STARVED {}!", world_states.states.len());
         return;
-    } else if world_states.received_per_sec.len() > 0 &&
+    }
+
+    // advance state to interp
+    let mut bootstrap_first_state = false;
+    if world_states.interp_started {
+        world_states.states.remove(0);
+    } else {
+        world_states.interp_started = true;
+        bootstrap_first_state = true;
+    }
+
+    let expected_buffer = 1 + f64::round(INTERP_DELAY_S / TICK_S) as usize;
+
+    if world_states.received_per_sec.len() > 0 &&
         now - world_states.received_per_sec.front().unwrap() < INTERP_DELAY_S as f32 {
         warn!("STARVED INTERP {} vs {}!", now - world_states.received_per_sec.back().unwrap(), INTERP_DELAY_S);
         return;
@@ -366,13 +473,7 @@ fn tick_simulation(
 
     //warn!("BUF {}!", world_states.states.len());
 
-    let mut bootstrap_first_state = false;
-    if world_states.interp_started {
-        world_states.states.remove(0);
-    } else {
-        world_states.interp_started = true;
-        bootstrap_first_state = true;
-    }
+
 
     if (bootstrap_first_state && world_states.states.len() < 2) ||
         world_states.states.is_empty() {

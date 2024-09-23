@@ -1,6 +1,4 @@
-use std::{
-    io
-};
+use std::{io, time};
 
 use bevy::prelude::*;
 use bytes::Bytes;
@@ -23,9 +21,10 @@ pub fn client_recv_packet_system(socket: Res<ResUdpSocket>, mut events: EventWri
                     // discard without sending a NetworkEvent
                     continue;
                 }
-                debug!("received payload {:?} from {}", payload, address);
-                //info!("received payload from {}", address);
-                events.send(NetworkEvent::Message(address, payload));
+
+                //debug!("{:?} received payload {:?} from {}", time::Instant::now() payload, address);
+
+                events.send(NetworkEvent::Message(address, payload, time::Instant::now()));
                 //recv_count += 1;
             }
             Err(e) => {
@@ -65,8 +64,9 @@ pub fn server_recv_packet_system(
                     // discard without sending a NetworkEvent
                     continue;
                 }
-                debug!("received payload {:?} from {}", payload, address);
-                events.send(NetworkEvent::Message(address, payload));
+                let now = time::Instant::now();
+                //debug!("{:?} received payload {:?} from {}", now, payload, address);
+                events.send(NetworkEvent::Message(address, payload, now));
             }
             Err(e) => {
                 if e.kind() != io::ErrorKind::WouldBlock {
@@ -86,6 +86,7 @@ pub fn send_packet_system(
 ) {
     let messages = transport.drain_messages_to_send(|_| true);
     for message in messages {
+        debug!("{} Send packet {:?} at {:?}", message.destination, message.payload, time::Instant::now());
         if let Err(e) = socket.0.send_to(&message.payload, message.destination) {
             events.send(NetworkEvent::SendError(socket.0.peer_addr().unwrap(), e, message));
         }

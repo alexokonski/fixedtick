@@ -1,8 +1,9 @@
+use clap::Parser;
 mod networking;
 mod common;
 
 use common::*;
-use std::{net::UdpSocket, time::Duration};
+use std::{net::UdpSocket, time, time::Duration};
 use std::ffi::c_void;
 use bevy::utils::HashMap;
 use std::net::SocketAddr;
@@ -17,21 +18,24 @@ use rand_chacha::rand_core::SeedableRng;
 use windows::Win32::Networking::WinSock;
 use std::os::windows::io::AsRawSocket;
 use windows::Win32::Foundation;
+use crate::networking::{NetworkResource, NetworkSystem};
 
-pub const LISTEN_ADDRESS: &str = "127.0.0.1:4567";
+pub const LISTEN_ADDRESS: &str = "127.0.0.1:7001";
 
 const PADDLE_LEFT_BOUND: f32 = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING;
 const PADDLE_RIGHT_BOUND: f32 = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING;
 
 #[derive(Component)]
 struct NetConnection {
+    addr: SocketAddr,
     paddle_entity: Entity,
     ball_entity: Entity
 }
 
 #[derive(Component, Default)]
 struct NetInput {
-    inputs: Vec<PlayerInput>
+    inputs: Vec<PlayerInputData>,
+    pings: Vec<PingData> // Not a good place for this, but being fast
 }
 
 #[derive(Resource, Default)]
@@ -65,46 +69,22 @@ impl NetIdGenerator {
         NetId(next)
     }
 }
-fn main() {
-    let socket = ResUdpSocket(UdpSocket::bind(LISTEN_ADDRESS).expect("could not bind socket"));
-    socket.0
-        .set_nonblocking(true)
-        .expect("could not set socket to be nonblocking");
-    socket.0
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("could not set read timeout");
 
-    // We don't want windows to spam us with recv errors if a remote port is closed...
-    // That spams logs and chokes the API, and is useless since we don't know which
-    // client it's from anyways
-    // SEE: https://github.com/mas-bandwidth/yojimbo/blob/b881662d72f21a171639fc6079052ce776cc9b2c/netcode/netcode.c#L519
-    if cfg!(windows) {
-        let win_socket = WinSock::SOCKET(socket.0.as_raw_socket().try_into().unwrap());
-        let value: Foundation::BOOL = false.into();
-        let value_ptr: Option<*const c_void> = Some(&value as *const _ as *const c_void);
-        let mut bytes_returned: u32 = 0;
-        let bytes_returned_ptr: *mut u32 = &mut bytes_returned;
-        let ret_val = unsafe {
-            WinSock::WSAIoctl(
-                win_socket,
-                WinSock::SIO_UDP_CONNRESET,
-                value_ptr,
-                size_of::<bool> as u32,
-                None,
-                0,
-                bytes_returned_ptr,
-                None,
-                None
-            )
-        };
-        if ret_val != 0 {
-            warn!("Failed to disable udp connection reset");
-        }
-    }
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long, default_value = LISTEN_ADDRESS)]
+    bind: String,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    let socket = ResUdpSocket::new_server(&args.bind);
 
     let rng = RandomGen{ r: ChaCha8Rng::seed_from_u64(1337) };
 
-    info!("Server now listening on {}", LISTEN_ADDRESS);
+    println!("Server now listening on {}", args.bind);
 
     let generator = NetIdGenerator::default();
 
@@ -116,7 +96,10 @@ fn main() {
         .insert_resource(socket)
         .insert_resource(rng)
         .add_plugins(DefaultPlugins)
-        .add_plugins(ServerPlugin)
+        //.add_plugins(ServerPlugin)
+        .insert_resource(NetworkResource::default())
+        .insert_resource(networking::transport::Transport::new())
+        .add_event::<networking::events::NetworkEvent>()
         .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
         .insert_resource(Score(0))
         .insert_resource(ClearColor(BACKGROUND_COLOR))
@@ -125,15 +108,19 @@ fn main() {
         .insert_resource(FixedTickWorldResource::default())
         .add_event::<CollisionEvent>()
         .add_systems(Startup, setup)
-        .add_systems(Update, connection_handler)
+        //.add_systems(Update, connection_handler.after(NetworkSystem::Receive))
         .add_systems(
             FixedUpdate,
             (
+                networking::systems::server_recv_packet_system.in_set(networking::NetworkSystem::Receive),
+                networking::systems::idle_timeout_system.in_set(networking::ServerSystem::IdleTimeout),
+                connection_handler,
                 move_paddles,
                 apply_velocity,
                 check_for_collisions,
                 update_scoreboard,
-                broadcast_world_state
+                broadcast_world_state,
+                networking::systems::send_packet_system.in_set(networking::NetworkSystem::Send),
             ).chain()
         )
         .run();
@@ -207,7 +194,11 @@ fn connection_handler(
     mut connections: ResMut<NetConnections>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut world_resource: ResMut<FixedTickWorldResource>
 ) {
+    world_resource.frame_counter += 1;
+    debug!("[{}]", world_resource.frame_counter);
+
     for event in events.read() {
         match event {
             NetworkEvent::Connected(handle) => {
@@ -219,6 +210,7 @@ fn connection_handler(
 
                 let id = commands.spawn((
                     NetConnection {
+                        addr: *handle,
                         paddle_entity,
                         ball_entity
                     },
@@ -235,7 +227,7 @@ fn connection_handler(
                     &mut connections,
                 );
             }
-            NetworkEvent::Message(handle, msg) => {
+            NetworkEvent::Message(handle, msg, recv_time) => {
                 let id = connections.addr_to_entity.get(handle);
                 if id.is_none() || !client_query.contains(*id.unwrap()) {
                     warn!("NetworkEvent::Message received from {}, but player was not found", handle);
@@ -249,6 +241,13 @@ fn connection_handler(
                             match packet {
                                 ClientToServerPacket::Input(input) => {
                                     client_query.get_mut(*id).unwrap().1.inputs.push(input);
+                                },
+                                ClientToServerPacket::Ping(rtt) => {
+                                    debug!("Received ping {} at {:?}, {} event send time",
+                                        rtt.ping_id,
+                                        time::Instant::now(),
+                                        recv_time.elapsed().as_millis());
+                                    client_query.get_mut(*id).unwrap().1.pings.push(rtt);
                                 }
                             }
                         }
@@ -259,7 +258,7 @@ fn connection_handler(
                     }
                     //info!("{}: Message from {}: {:?}", net_id, handle, msg);
                 }
-                info!("{} sent a message: {:?}", handle, msg);
+                //info!("{} sent a message: {:?}", handle, msg);
             }
             NetworkEvent::SendError(handle, err, msg) => {
                 handle_client_disconnected(
@@ -303,11 +302,10 @@ fn broadcast_world_state(
     paddles: Query<(&Transform, &NetId), With<Paddle>>,
     score: Res<Score>,
     mut transport: ResMut<Transport>,
-    mut world_resource: ResMut<FixedTickWorldResource>,
-    connections: ResMut<NetConnections>
+    world_resource: Res<FixedTickWorldResource>,
+    connections: ResMut<NetConnections>,
+    mut client_query: Query<(&NetConnection, &mut NetInput)>,
 ) {
-    world_resource.frame_counter += 1;
-
     if connections.addr_to_entity.is_empty() {
         return;
     }
@@ -342,17 +340,24 @@ fn broadcast_world_state(
         net_id: NetId(0) // Singleton entity
     });
 
-    //world.entities_removed = world_resource.net_ids_removed_this_frame.clone();
-    //world_resource.net_ids_removed_this_frame.clear();
-
-    let mut buf = [0; networking::ETHERNET_MTU];
-
     // Will just blow up if world state gets to big, fine by me right now
     let packet = ServerToClientPacket::WorldState(world);
-    let num_bytes = bincode::serde::encode_into_slice(packet, &mut buf, config::standard()).unwrap();
+    let mut world_state_buf = [0; networking::ETHERNET_MTU];
+    let num_bytes = bincode::serde::encode_into_slice(packet, &mut world_state_buf, config::standard()).unwrap();
 
-    for (addr, _) in connections.addr_to_entity.iter() {
-        transport.send(*addr, &buf[..num_bytes]);
+    for (conn, mut input) in client_query.iter_mut() {
+        transport.send(conn.addr, &world_state_buf[..num_bytes]);
+
+        let mut ping_buf = [0; networking::ETHERNET_MTU];
+        for ping in &input.pings {
+            let packet = ServerToClientPacket::Pong(ping.clone());
+            let num_bytes = bincode::serde::encode_into_slice(packet, &mut ping_buf, config::standard()).unwrap();
+
+            debug!("Sent ping {} to {} at {:?}", ping.ping_id, conn.addr, time::Instant::now());
+
+            transport.send(conn.addr, &ping_buf[..num_bytes]);
+        }
+        input.pings.clear();
     }
 }
 
@@ -373,28 +378,30 @@ fn move_paddles(
         let mut paddle_transform = paddle_query.get_mut(net_connection.paddle_entity).unwrap();
         let mut direction = 0.0;
 
-        // buffer 2 inputs
-        if net_input.inputs.len() < 2 {
+        if net_input.inputs.is_empty() {
             continue;
         }
 
-        let buttons = net_input.inputs.remove(0).key_mask;
+        //let buttons = net_input.inputs.remove(0).key_mask;
 
-        if (buttons & NetKey::Left as u8) != 0 {
-            direction -= 1.0;
+        for input in net_input.inputs.drain(..) {
+            let buttons = input.key_mask;
+            if (buttons & (1 << NetKey::Left as u8)) != 0 {
+                direction -= 1.0;
+            }
+
+            if (buttons & (1 << NetKey::Right as u8)) != 0{
+                direction += 1.0;
+            }
+
+            // Calculate the new horizontal paddle position based on player input
+            let new_paddle_position =
+                paddle_transform.translation.x + direction * PADDLE_SPEED * time.delta_seconds();
+
+            // Update the paddle position,
+            // making sure it doesn't cause the paddle to leave the arena
+            paddle_transform.translation.x = new_paddle_position.clamp(PADDLE_LEFT_BOUND, PADDLE_RIGHT_BOUND);
         }
-
-        if (buttons & NetKey::Right as u8) != 0{
-            direction += 1.0;
-        }
-
-        // Calculate the new horizontal paddle position based on player input
-        let new_paddle_position =
-            paddle_transform.translation.x + direction * PADDLE_SPEED * time.delta_seconds();
-
-        // Update the paddle position,
-        // making sure it doesn't cause the paddle to leave the arena
-        paddle_transform.translation.x = new_paddle_position.clamp(PADDLE_LEFT_BOUND, PADDLE_RIGHT_BOUND);
     }
 }
 
