@@ -6,6 +6,8 @@ use bevy::{
 use serde::Serialize;
 use serde::Deserialize;
 
+pub const HEADER_BYTE: u8 = 0xba;
+
 pub const TICK_RATE_HZ: f64 = 60.0;
 
 // These constants are defined in `Transform` units.
@@ -43,6 +45,18 @@ pub const SCOREBOARD_FONT_SIZE: f32 = 40.0;
 pub const SCOREBOARD_TEXT_PADDING: Val = Val::Px(5.0);
 
 pub const BACKGROUND_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
+
+pub const RED: Color = Color::srgb(0.8, 0.0, 0.0);
+pub const GREEN: Color = Color::srgb(0.0, 0.8, 0.0);
+pub const BLUE: Color = Color::srgb(0.0, 0.0, 0.8);
+pub const PURPLE: Color = Color::srgb(0.8, 0.0, 0.0);
+pub const YELLOW: Color = Color::srgb(0.8, 0.8, 0.0);
+pub const CYAN: Color = Color::srgb(0.0, 0.8, 0.8);
+pub const VIOLET: Color = Color::srgb(0.8, 0.0, 0.8);
+
+pub const NUM_COLORS: usize = 7;
+pub const COLORS: [Color; NUM_COLORS] = [RED, GREEN, BLUE, PURPLE, YELLOW, CYAN, VIOLET];
+
 pub const PADDLE_COLOR: Color = Color::srgb(0.3, 0.3, 0.7);
 pub const BALL_COLOR: Color = Color::srgb(1.0, 0.5, 0.5);
 pub const BRICK_COLOR: Color = Color::srgb(0.5, 0.5, 1.0);
@@ -174,7 +188,8 @@ pub enum ClientToServerPacket {
 
 #[derive(Deserialize, Serialize)]
 pub struct NetPaddleData {
-    pub pos: Vec2
+    pub pos: Vec2,
+    pub player_index: NetPlayerIndex
 }
 
 #[derive(Deserialize, Serialize)]
@@ -184,7 +199,8 @@ pub struct NetBrickData {
 
 #[derive(Deserialize, Serialize)]
 pub struct NetBallData {
-    pub pos: Vec2
+    pub pos: Vec2,
+    pub player_index: NetPlayerIndex
 }
 
 #[derive(Deserialize, Serialize)]
@@ -197,11 +213,14 @@ pub enum NetEntityType {
     Paddle(NetPaddleData),
     Brick(NetBrickData),
     Ball(NetBallData),
-    Score(NetScoreData)
+    Score(NetScoreData),
 }
 
 #[derive(Component, Deserialize, Serialize, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct NetId(pub u16);
+
+#[derive(Component, Deserialize, Serialize, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct NetPlayerIndex(pub u8);
 
 #[derive(Deserialize, Serialize)]
 pub struct NetEntity {
@@ -326,10 +345,11 @@ pub struct PaddleBundle {
     paddle: Paddle,
     collider: Collider,
     net_id: NetId,
+    player: NetPlayerIndex
 }
 
 impl PaddleBundle {
-    pub fn new(translation: Vec2, net_id: NetId) -> Self {
+    pub fn new(translation: Vec2, net_id: NetId, player: NetPlayerIndex) -> Self {
         PaddleBundle {
             sprite_bundle: SpriteBundle {
                 transform: Transform {
@@ -338,49 +358,26 @@ impl PaddleBundle {
                     ..default()
                 },
                 sprite: Sprite {
-                    color: PADDLE_COLOR,
+                    color: COLORS[player.0 as usize % COLORS.len()],
                     ..default()
                 },
                 ..default()
             },
             paddle: Paddle,
             collider: Collider,
-            net_id
+            net_id,
+            player
         }
     }
 }
-
-/*
-pub fn spawn_paddle(
-    mut commands: Commands,
-    translation: Vec2,
-    net_id: NetId
-) -> EntityCommands {
-    commands.spawn((
-        SpriteBundle {
-            transform: Transform {
-                translation: Vec3::from((translation, 0.0)),
-                scale: PADDLE_SIZE.extend(1.0),
-                ..default()
-            },
-            sprite: Sprite {
-                color: PADDLE_COLOR,
-                ..default()
-            },
-            ..default()
-        },
-        Paddle,
-        Collider,
-        net_id
-    ))
-}*/
 
 #[derive(Bundle)]
 pub struct BallBundle {
     mesh_bundle: MaterialMesh2dBundle<ColorMaterial>,
     ball: Ball,
     velocity: Velocity,
-    net_id: NetId
+    net_id: NetId,
+    player: NetPlayerIndex
 }
 
 impl BallBundle {
@@ -388,42 +385,23 @@ impl BallBundle {
         meshes: &mut Assets<Mesh>,
         materials: &mut Assets<ColorMaterial>,
         translation: Vec2,
-        net_id: NetId) -> Self {
+        net_id: NetId,
+        player: NetPlayerIndex) -> Self {
        BallBundle {
            mesh_bundle: MaterialMesh2dBundle {
                mesh: meshes.add(Circle::default()).into(),
-               material: materials.add(BALL_COLOR),
+               material: materials.add(COLORS[player.0 as usize % COLORS.len()]),
                transform: Transform::from_translation(Vec3::from((translation, 1.0)))
                    .with_scale(Vec2::splat(BALL_DIAMETER).extend(1.)),
                ..default()
            },
            ball: Ball,
            velocity: Velocity(INITIAL_BALL_DIRECTION.normalize() * BALL_SPEED),
-           net_id
+           net_id,
+           player
        }
     }
 }
-
-/*pub fn spawn_ball(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ColorMaterial>,
-    translation: Vec2,
-    net_id: NetId
-) -> EntityCommands {
-    commands.spawn((
-        MaterialMesh2dBundle {
-            mesh: meshes.add(Circle::default()).into(),
-            material: materials.add(BALL_COLOR),
-            transform: Transform::from_translation(Vec3::from((translation, 1.0)))
-                .with_scale(Vec2::splat(BALL_DIAMETER).extend(1.)),
-            ..default()
-        },
-        Ball,
-        Velocity(INITIAL_BALL_DIRECTION.normalize() * BALL_SPEED),
-        net_id
-    ))
-}*/
 
 #[derive(Bundle)]
 pub struct BrickBundle {

@@ -40,7 +40,8 @@ struct NetInput {
 
 #[derive(Resource, Default)]
 struct NetConnections {
-    addr_to_entity: HashMap<SocketAddr, Entity>
+    addr_to_entity: HashMap<SocketAddr, Entity>,    // Players are removed when they disconnect
+    next_player_index: u8
 }
 
 #[derive(Resource)]
@@ -96,10 +97,7 @@ fn main() {
         .insert_resource(socket)
         .insert_resource(rng)
         .add_plugins(DefaultPlugins)
-        //.add_plugins(ServerPlugin)
-        .insert_resource(NetworkResource::default())
-        .insert_resource(networking::transport::Transport::new())
-        .add_event::<networking::events::NetworkEvent>()
+        .add_plugins(networking::ServerPluginNoSystems)
         .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
         .insert_resource(Score(0))
         .insert_resource(ClearColor(BACKGROUND_COLOR))
@@ -108,11 +106,10 @@ fn main() {
         .insert_resource(FixedTickWorldResource::default())
         .add_event::<CollisionEvent>()
         .add_systems(Startup, setup)
-        //.add_systems(Update, connection_handler.after(NetworkSystem::Receive))
         .add_systems(
             FixedUpdate,
             (
-                networking::systems::server_recv_packet_system.in_set(networking::NetworkSystem::Receive),
+                networking::systems::server_recv_packet_system.in_set(NetworkSystem::Receive),
                 networking::systems::idle_timeout_system.in_set(networking::ServerSystem::IdleTimeout),
                 connection_handler,
                 move_paddles,
@@ -120,7 +117,7 @@ fn main() {
                 check_for_collisions,
                 update_scoreboard,
                 broadcast_world_state,
-                networking::systems::send_packet_system.in_set(networking::NetworkSystem::Send),
+                networking::systems::send_packet_system.in_set(NetworkSystem::Send),
             ).chain()
         )
         .run();
@@ -204,9 +201,10 @@ fn connection_handler(
             NetworkEvent::Connected(handle) => {
                 info!("{}: connected!", handle);
 
+                let next_player = NetPlayerIndex(connections.next_player_index);
                 let paddle_x = rng.r.gen_range(PADDLE_LEFT_BOUND..=PADDLE_RIGHT_BOUND);
-                let paddle_entity = commands.spawn(PaddleBundle::new(Vec2::new(paddle_x, PADDLE_Y), net_id_gen.next())).id();
-                let ball_entity = commands.spawn(BallBundle::new(&mut meshes, &mut materials, BALL_STARTING_POSITION, net_id_gen.next())).id();
+                let paddle_entity = commands.spawn(PaddleBundle::new(Vec2::new(paddle_x, PADDLE_Y), net_id_gen.next(), next_player)).id();
+                let ball_entity = commands.spawn(BallBundle::new(&mut meshes, &mut materials, BALL_STARTING_POSITION, net_id_gen.next(), next_player)).id();
 
                 let id = commands.spawn((
                     NetConnection {
@@ -217,6 +215,7 @@ fn connection_handler(
                     NetInput::default()
                 )).id();
                 connections.addr_to_entity.insert(handle.clone(), id);
+                connections.next_player_index += 1;
             }
             NetworkEvent::Disconnected(handle) => {
                 info!("{}: disconnected!", handle);
@@ -298,8 +297,8 @@ fn handle_client_disconnected(
 
 fn broadcast_world_state(
     bricks: Query<(&Transform, &NetId), With<Brick>>,
-    balls: Query<(&Transform, &NetId), With<Ball>>,
-    paddles: Query<(&Transform, &NetId), With<Paddle>>,
+    balls: Query<(&Transform, &NetId, &NetPlayerIndex) , With<Ball>>,
+    paddles: Query<(&Transform, &NetId, &NetPlayerIndex), With<Paddle>>,
     score: Res<Score>,
     mut transport: ResMut<Transport>,
     world_resource: Res<FixedTickWorldResource>,
@@ -321,16 +320,16 @@ fn broadcast_world_state(
         });
     }
 
-    for (transform, &id) in balls.iter() {
+    for (transform, &id, &player) in balls.iter() {
         world.entities.push(NetEntity {
-            entity_type: NetEntityType::Ball(NetBallData { pos: transform.translation.xy() }),
+            entity_type: NetEntityType::Ball(NetBallData { pos: transform.translation.xy(), player_index: player }),
             net_id: id
         });
     }
 
-    for (transform, &id) in paddles.iter() {
+    for (transform, &id, &player) in paddles.iter() {
         world.entities.push(NetEntity {
-            entity_type: NetEntityType::Paddle(NetPaddleData { pos: transform.translation.xy() }),
+            entity_type: NetEntityType::Paddle(NetPaddleData { pos: transform.translation.xy(), player_index: player }),
             net_id: id
         });
     }

@@ -66,7 +66,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
     let remote_addr = format!("{}:{}", args.ip, args.port).parse().expect("could not parse addr");
-    let socket = ResUdpSocket::new_client("0.0.0.0:0", remote_addr);
+    let socket = ResUdpSocket::new_client(remote_addr);
     //let addr = socket.0.local_addr().unwrap();
     //println!("local socket addr: {}", addr);
     let res_addr = ResSocketAddr(remote_addr);
@@ -137,6 +137,7 @@ fn connection_handler(
         match event {
             NetworkEvent::Message(handle, msg, recv_time) => {
                 let config = config::standard();
+
                 type ServerToClientResult = Result<(ServerToClientPacket, usize), DecodeError>;
                 let decode_result: ServerToClientResult = bincode::serde::decode_from_slice(msg.as_ref(), config);
                 match decode_result {
@@ -197,47 +198,6 @@ fn interpolate_frame(
     }
 }
 
-/*fn spawn_paddle_with_interpolated_transform(
-    commands: &mut Commands,
-    translation: Vec2,
-    net_id: NetId
-) -> Entity {
-    spawn_paddle(commands, translation, net_id).insert(InterpolatedTransform::default()).net_id()
-}
-
-fn spawn_ball_with_interpolated_transform(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ColorMaterial>,
-    translation: Vec2,
-    net_id: NetId
-) -> Entity {
-    spawn_ball(commands, meshes, materials, translation, net_id).net_id()
-}
-fn spawn_brick_with_interpolated_transform(
-    commands: &mut Commands,
-    brick_position: Vec2, net_id: NetId
-) -> Entity {
-    spawn_brick(commands, brick_position, net_id).net_id()
-}*/
-
-// https://www.reddit.com/r/bevy/comments/su7k1d/whats_the_proper_way_to_bundle_entities_that/hxad818/
-/*trait SpawnInterpolatedTransformBundleEx<'w> {
-    fn spawn_interpolated_transform_bundle<B: Bundle>(
-        &mut self, bundle: B
-    ) -> EntityCommands;
-}
-
-impl <'w> SpawnInterpolatedTransformBundleEx<'w> for Commands<'w, 'w> {
-    fn spawn_interpolated_transform_bundle<B>(
-        &mut self, bundle: B
-    ) -> EntityCommands where B: Bundle {
-        let mut e = self.spawn(bundle);
-        e.insert(InterpolatedTransform::default());
-        e
-    }
-}*/
-
 trait SpawnInterpolatedTransformBundleEx {
     // define a method that we will be able to call on `commands`
     fn spawn_interpolated_transform_bundle<B: Bundle>(
@@ -271,13 +231,13 @@ fn sync_net_ids_if_needed_and_update_score(
         if !net_id_map.net_id_to_entity_id.contains_key(&net_ent.net_id) {
             let entity_id = match &net_ent.entity_type {
                 NetEntityType::Paddle(d) => {
-                    Some(commands.spawn_interpolated_transform_bundle(PaddleBundle::new(d.pos, net_ent.net_id)))
+                    Some(commands.spawn_interpolated_transform_bundle(PaddleBundle::new(d.pos, net_ent.net_id, d.player_index)))
                 }
                 NetEntityType::Brick(d) => {
                     Some(commands.spawn_interpolated_transform_bundle(BrickBundle::new(d.pos, net_ent.net_id)))
                 }
                 NetEntityType::Ball(d) => {
-                    Some(commands.spawn_interpolated_transform_bundle(BallBundle::new(meshes, materials, d.pos, net_ent.net_id)))
+                    Some(commands.spawn_interpolated_transform_bundle(BallBundle::new(meshes, materials, d.pos, net_ent.net_id, d.player_index)))
                 }
                 NetEntityType::Score(d) => {
                     // Feels gross to do this here, TODO: find a better spot
@@ -299,22 +259,6 @@ fn sync_net_ids_if_needed_and_update_score(
         }
     }
 }
-
-/*fn remove_entities(
-    commands: &mut Commands,
-    ws: &WorldStateData,
-    net_id_map: &mut ResMut<NetIdToEntityId>,
-) {
-    for net_id in ws.entities_removed.iter() {
-        match net_id_map.net_id_to_entity_id.get(net_id) {
-            Some(entity) => {
-                commands.entity(*entity).despawn();
-                net_id_map.net_id_to_entity_id.remove(net_id);
-            }
-            _ => {}
-        }
-    }
-}*/
 
 fn setup(
     mut commands: Commands,
@@ -545,13 +489,3 @@ fn set_transform_from_net_entity(net_ent: &NetEntity, transform: &mut Transform)
         NetEntityType::Score(_) => {}
     }
 }
-/*fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_systems(Update, hello_world_system)
-        .run();
-}
-
-fn hello_world_system() {
-    println!("hello world");
-}*/
