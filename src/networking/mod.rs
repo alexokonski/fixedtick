@@ -38,7 +38,7 @@ impl Default for NetworkResource {
     fn default() -> Self {
         Self {
             connections: Default::default(),
-            idle_timeout: Duration::from_secs_f32(DEFAULT_IDLE_TIMEOUT_SECS),
+            idle_timeout: Duration::from_secs_f32(DEFAULT_IDLE_TIMEOUT_SECS)
         }
     }
 }
@@ -62,14 +62,19 @@ pub enum ClientSystem {
     Heartbeat,
 }
 
-pub struct ServerPlugin;
-
+#[derive(Default)]
+pub struct ServerPlugin {
+    pub sim_settings: transport::SimLatencySettings,
+    pub no_systems: bool
+}
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(NetworkResource::default())
-            .insert_resource(transport::Transport::new())
-            .add_event::<events::NetworkEvent>()
-            .add_systems(
+            .insert_resource(transport::Transport::new(self.sim_settings.clone()))
+            .add_event::<events::NetworkEvent>();
+
+        if !self.no_systems {
+            app.add_systems(
                 Update,
                 (
                     systems::server_recv_packet_system.in_set(NetworkSystem::Receive),
@@ -77,13 +82,18 @@ impl Plugin for ServerPlugin {
                     systems::idle_timeout_system.in_set(ServerSystem::IdleTimeout)
                 )
             );
+        }
     }
 }
 
 #[derive(Resource)]
 pub struct HeartbeatTimer(pub Timer);
 
-pub struct ClientPlugin;
+#[derive(Default)]
+pub struct ClientPlugin {
+    pub sim_settings: transport::SimLatencySettings,
+    pub no_systems: bool
+}
 
 #[derive(Resource)]
 pub struct ResUdpSocket(pub UdpSocket);
@@ -131,8 +141,8 @@ impl ResUdpSocket {
 
         socket
     }
-    pub fn new_client(local_bind: &str, remote_addr: SocketAddr) -> Self {
-        Self::new(local_bind, Some(remote_addr))
+    pub fn new_client(remote_addr: SocketAddr) -> Self {
+        Self::new("0.0.0.0:0", Some(remote_addr))
     }
 
     pub fn new_server(local_bind: &str) -> Self {
@@ -145,13 +155,15 @@ pub struct ResSocketAddr(pub(crate) SocketAddr);
 
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(transport::Transport::new())
+        app.insert_resource(transport::Transport::new(self.sim_settings.clone()))
             .insert_resource(HeartbeatTimer(Timer::from_seconds(
                 DEFAULT_HEARTBEAT_TICK_RATE_SECS,
                 TimerMode::Repeating,
             )))
-            .add_event::<events::NetworkEvent>()
-            .add_systems(
+            .add_event::<events::NetworkEvent>();
+
+        if !self.no_systems {
+            app.add_systems(
                 Update,
                 (
                     systems::client_recv_packet_system.in_set(NetworkSystem::Receive),
@@ -159,5 +171,6 @@ impl Plugin for ClientPlugin {
                     systems::auto_heartbeat_system.in_set(ClientSystem::Heartbeat)
                 )
             );
+        }
     }
 }

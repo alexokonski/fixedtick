@@ -18,8 +18,6 @@ use crate::networking::{transport, NetworkSystem};
 //use itertools::Itertools;
 //use std::time::{Instant};
 
-const MIN_JITTER_S: f64 = (1.0 / 1000.0) * 6.0;
-const TICK_S: f64 = 1.0 / TICK_RATE_HZ;
 const INTERP_DELAY_S: f64 = TICK_S + MIN_JITTER_S;
 
 #[derive(Resource, Default)]
@@ -61,6 +59,9 @@ struct Args {
 
     #[arg(long, default_value_t = 7001)]
     port: u16,
+
+    #[command(flatten)]
+    sim_latency: SimLatencyArgs
 }
 
 fn main() {
@@ -70,6 +71,26 @@ fn main() {
     //let addr = socket.0.local_addr().unwrap();
     //println!("local socket addr: {}", addr);
     let res_addr = ResSocketAddr(remote_addr);
+    let sim_settings = transport::SimLatencySettings {
+        send: transport::SimLatencySetting {
+            latency: transport::SimLatency {
+                base_ms: args.sim_latency.send_sim_latency_ms,
+                jitter_stddev_ms: args.sim_latency.send_jitter_stddev_ms
+            },
+            loss: transport::SimLoss {
+                loss_chance: 0.0
+            }
+        },
+        receive: transport::SimLatencySetting {
+            latency: transport::SimLatency {
+                base_ms: args.sim_latency.recv_sim_latency_ms,
+                jitter_stddev_ms: args.sim_latency.recv_jitter_stddev_ms
+            },
+            loss: transport::SimLoss {
+                loss_chance: 0.0
+            }
+        }
+    };
 
     App::new()
         .insert_resource(bevy::winit::WinitSettings {
@@ -92,12 +113,7 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(PerfUiPlugin)
         .add_plugins(DefaultPlugins)
-        //.add_plugins(ClientPlugin)
-        .insert_resource(networking::transport::Transport::new())
-        .insert_resource(networking::HeartbeatTimer(Timer::from_seconds(
-            networking::DEFAULT_HEARTBEAT_TICK_RATE_SECS,
-            TimerMode::Repeating,
-        )))
+        .add_plugins(ClientPlugin{sim_settings, no_systems: true})
         .add_event::<networking::events::NetworkEvent>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -110,6 +126,7 @@ fn main() {
         .add_systems (
             FixedUpdate,
             (
+                common::start_tick,
                 networking::systems::client_recv_packet_system.in_set(NetworkSystem::Receive),
                 send_input,
                 connection_handler,
@@ -118,6 +135,7 @@ fn main() {
                 update_scoreboard,
                 networking::systems::auto_heartbeat_system.in_set(networking::ClientSystem::Heartbeat),
                 networking::systems::send_packet_system.in_set(NetworkSystem::Send),
+                common::end_tick
             ).chain()
         )
         .run();
@@ -127,11 +145,8 @@ fn connection_handler(
     mut events: EventReader<NetworkEvent>,
     mut world_states: ResMut<WorldStates>,
     mut ping_state: ResMut<PingState>,
-    mut fixed_state: ResMut<FixedTickWorldResource>,
     time: Res<Time<Real>>,
 ) {
-    fixed_state.frame_counter += 1;
-    debug!("({})", fixed_state.frame_counter);
     //let mut recv_count = 0;
     for event in events.read() {
         match event {
@@ -144,17 +159,10 @@ fn connection_handler(
                     Ok((packet, _)) => {
                         match packet {
                             ServerToClientPacket::WorldState(ws) => {
-                                //recv_count += 1;
                                 world_states.states.push(ws);
                                 world_states.received_per_sec.push_back(time.elapsed_seconds())
                             },
                             ServerToClientPacket::Pong(pd) => {
-                                //recv_count += 1;
-                                /*debug!("({}) Received pong {} at {:?}, {} event send time",
-                                        fixed_state.frame_counter,
-                                        pd.ping_id,
-                                        time::Instant::now(),
-                                        recv_time.elapsed().as_millis());*/
                                 ping_state.pongs.push(pd);
                             }
                         }
@@ -306,7 +314,10 @@ fn send_input (
     keyboard_input: Res<ButtonInput<KeyCode>>,
     remote_addr: Res<ResSocketAddr>,
     mut transport: ResMut<Transport>,
+    mut fixed_state: ResMut<FixedTickWorldResource>,
 ) {
+    fixed_state.frame_counter += 1;
+    debug!("({})", fixed_state.frame_counter);
     let mut input = PlayerInputData::default();
 
     if keyboard_input.pressed(KeyCode::ArrowLeft) {
@@ -364,7 +375,6 @@ fn tick_simulation(
     time: Res<Time<Real>>,
 ) {
     // Clear old entries from our stats
-    //let now_inst = Instant::now();
     let now = time.elapsed_seconds();
     while !world_states.received_per_sec.is_empty() {
         let entry = *world_states.received_per_sec.front().unwrap();

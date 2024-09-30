@@ -1,3 +1,4 @@
+use std::time;
 use bevy::{
     math::bounding::{Aabb2d, BoundingCircle, BoundingVolume, IntersectsVolume},
     prelude::*,
@@ -5,10 +6,12 @@ use bevy::{
 };
 use serde::Serialize;
 use serde::Deserialize;
+use clap::{Parser, Args};
 
 pub const HEADER_BYTE: u8 = 0xba;
-
 pub const TICK_RATE_HZ: f64 = 60.0;
+pub const TICK_S: f64 = 1.0 / TICK_RATE_HZ;
+pub const MIN_JITTER_S: f64 = (1.0 / 1000.0) * 6.0;
 
 // These constants are defined in `Transform` units.
 // Using the default 2D camera they correspond 1:1 with screen pixels.
@@ -172,7 +175,7 @@ pub enum NetKey {
 pub struct PlayerInputData {
     pub key_mask: u8,
     pub simulating_frame: u32,
-    pub cookie: u32
+    pub sequence: u32
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -277,6 +280,7 @@ fn ball_collision(ball: BoundingCircle, bounding_box: Aabb2d) -> Option<Collisio
 #[derive(Resource, Default)]
 pub struct FixedTickWorldResource {
     pub frame_counter: u32,
+    pub tick_start: Option<time::Instant>
     //pub net_ids_removed_this_frame: Vec<NetId>
 }
 
@@ -491,29 +495,30 @@ impl ScoreboardUiBundle {
     }
 }
 
-/*pub fn spawn_scoreboard(commands: &mut Commands) {
-    commands.spawn((
-        ScoreboardUi,
-        TextBundle::from_sections([
-            TextSection::new(
-                "Score: ",
-                TextStyle {
-                    font_size: SCOREBOARD_FONT_SIZE,
-                    color: TEXT_COLOR,
-                    ..default()
-                },
-            ),
-            TextSection::from_style(TextStyle {
-                font_size: SCOREBOARD_FONT_SIZE,
-                color: SCORE_COLOR,
-                ..default()
-            }),
-        ])
-            .with_style(Style {
-                position_type: PositionType::Absolute,
-                top: SCOREBOARD_TEXT_PADDING,
-                left: SCOREBOARD_TEXT_PADDING,
-                ..default()
-            }),
-    ));
-}*/
+pub fn start_tick(
+    mut world_resource: ResMut<FixedTickWorldResource>
+) {
+    world_resource.frame_counter += 1;
+    world_resource.tick_start = Some(time::Instant::now());
+}
+
+pub fn end_tick(
+    mut world_resource: ResMut<FixedTickWorldResource>
+) {
+    debug!("tick time: {:?}", world_resource.tick_start.unwrap().elapsed());
+}
+
+#[derive(Args, Debug)]
+pub struct SimLatencyArgs {
+    #[arg(long, default_value_t = 0)]
+    pub send_sim_latency_ms: u32,
+
+    #[arg(long, default_value_t = 0)]
+    pub send_jitter_stddev_ms: u32,
+
+    #[arg(long, default_value_t = 0)]
+    pub recv_sim_latency_ms: u32,
+
+    #[arg(long, default_value_t = 0)]
+    pub recv_jitter_stddev_ms: u32,
+}

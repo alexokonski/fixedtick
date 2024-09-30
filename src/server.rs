@@ -4,6 +4,7 @@ mod common;
 
 use common::*;
 use std::{net::UdpSocket, time, time::Duration};
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use bevy::utils::HashMap;
 use std::net::SocketAddr;
@@ -21,7 +22,8 @@ use windows::Win32::Foundation;
 use crate::networking::{NetworkResource, NetworkSystem};
 
 pub const LISTEN_ADDRESS: &str = "127.0.0.1:7001";
-
+const BUFFER_DELAY_S: f64 = 1.0 * TICK_S + MIN_JITTER_S;
+const BUFFER_LEN: usize = 1 + ((BUFFER_DELAY_S / TICK_S) as usize);
 const PADDLE_LEFT_BOUND: f32 = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING;
 const PADDLE_RIGHT_BOUND: f32 = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING;
 
@@ -32,10 +34,24 @@ struct NetConnection {
     ball_entity: Entity
 }
 
+#[derive(Default)]
+struct ReceivedPlayerInput {
+    data: PlayerInputData,
+    time_received: f32
+}
+
+#[derive(Clone, Copy, Default)]
+enum NetInputState {
+    #[default]
+    Buffering,
+    Playing
+}
+
 #[derive(Component, Default)]
 struct NetInput {
-    inputs: Vec<PlayerInputData>,
-    pings: Vec<PingData> // Not a good place for this, but being fast
+    input_state: NetInputState,
+    inputs: VecDeque<ReceivedPlayerInput>,
+    pings: VecDeque<PingData> // Not a good place for this, but being fast
 }
 
 #[derive(Resource, Default)]
@@ -97,7 +113,7 @@ fn main() {
         .insert_resource(socket)
         .insert_resource(rng)
         .add_plugins(DefaultPlugins)
-        .add_plugins(networking::ServerPluginNoSystems)
+        .add_plugins(networking::ServerPlugin{sim_settings: Default::default(), no_systems: true})
         .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
         .insert_resource(Score(0))
         .insert_resource(ClearColor(BACKGROUND_COLOR))
@@ -109,15 +125,17 @@ fn main() {
         .add_systems(
             FixedUpdate,
             (
+                common::start_tick,
                 networking::systems::server_recv_packet_system.in_set(NetworkSystem::Receive),
                 networking::systems::idle_timeout_system.in_set(networking::ServerSystem::IdleTimeout),
                 connection_handler,
-                move_paddles,
+                process_input,
                 apply_velocity,
                 check_for_collisions,
                 update_scoreboard,
                 broadcast_world_state,
                 networking::systems::send_packet_system.in_set(NetworkSystem::Send),
+                common::end_tick
             ).chain()
         )
         .run();
@@ -191,11 +209,13 @@ fn connection_handler(
     mut connections: ResMut<NetConnections>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut world_resource: ResMut<FixedTickWorldResource>
+    mut world_resource: ResMut<FixedTickWorldResource>,
+    mut real_time: Res<Time<Real>>
 ) {
     world_resource.frame_counter += 1;
     debug!("[{}]", world_resource.frame_counter);
 
+    let mut num_inputs_processed = 0;
     for event in events.read() {
         match event {
             NetworkEvent::Connected(handle) => {
@@ -239,21 +259,27 @@ fn connection_handler(
                         Ok((packet, _)) => {
                             match packet {
                                 ClientToServerPacket::Input(input) => {
-                                    client_query.get_mut(*id).unwrap().1.inputs.push(input);
+                                    num_inputs_processed += 1;
+                                    //debug!("recv: {}", real_time.elapsed_seconds());
+                                    client_query.get_mut(*id).unwrap().1.inputs.push_back(
+                                        ReceivedPlayerInput {
+                                            data: input,
+                                            time_received: real_time.elapsed_seconds()
+                                        }
+                                    );
                                 },
                                 ClientToServerPacket::Ping(rtt) => {
                                     debug!("Received ping {} at {:?}, {} event send time",
                                         rtt.ping_id,
                                         time::Instant::now(),
                                         recv_time.elapsed().as_millis());
-                                    client_query.get_mut(*id).unwrap().1.pings.push(rtt);
+                                    client_query.get_mut(*id).unwrap().1.pings.push_back(rtt);
                                 }
                             }
                         }
                         Err(err) => {
                             warn!("{}: Error parsing message from {}: {:?} {:?}", id, handle, err, msg);
                         }
-
                     }
                     //info!("{}: Message from {}: {:?}", net_id, handle, msg);
                 }
@@ -276,6 +302,8 @@ fn connection_handler(
             }
         }
     }
+
+    debug!("{} inputs processed!", num_inputs_processed);
 }
 
 fn handle_client_disconnected(
@@ -368,23 +396,96 @@ fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time>
 }
 
 // Not good strict ECS because i'm mutating both input and transforms in the same system, should maybe be broken up with events?
-fn move_paddles(
+fn process_input(
     mut client_query: Query<(&NetConnection, &mut NetInput)>,
     mut paddle_query: Query<&mut Transform, With<Paddle>>,
-    time: Res<Time>,
+    mut fixed_time: Res<Time>,
+    mut real_time: Res<Time<Real>>,
 ) {
     for (net_connection, mut net_input) in client_query.iter_mut() {
         let mut paddle_transform = paddle_query.get_mut(net_connection.paddle_entity).unwrap();
         let mut direction = 0.0;
 
-        if net_input.inputs.is_empty() {
+
+        let input_state = net_input.input_state;
+        match input_state {
+            NetInputState::Buffering => {
+                let now = real_time.elapsed_seconds();
+                if net_input.inputs.is_empty() {
+                    info!("EMPTY INPUTS BUFFERING");
+                    continue;
+                } else if now - net_input.inputs.front().unwrap().time_received < BUFFER_DELAY_S as f32 {
+                    info!("(NOW {}) {:?}", now, net_input.inputs.iter().map(|input| input.time_received).collect::<Vec<_>>());
+                    continue;
+                } else {
+                    net_input.input_state = NetInputState::Playing;
+                }
+            }
+            NetInputState::Playing => {
+                if net_input.inputs.is_empty()  {
+                    info!("EMPTY INPUTS TRANSITION TO BUFFERING");
+                    net_input.input_state = NetInputState::Buffering;
+                    continue;
+                }
+            }
+        }
+
+        /*if net_input.inputs.is_empty()  {
+            info!("EMPTY INPUTS");
             continue;
         }
 
-        //let buttons = net_input.inputs.remove(0).key_mask;
+        let now = real_time.elapsed_seconds();
+        if now - net_input.inputs.front().unwrap().time_received < BUFFER_DELAY_S {
+            info!("{} {} {} BUFFERING INPUT {} < {} BACK DIFF (len {}) {} ",
+                now,
+                net_input.inputs.front().unwrap().time_received,
+                net_input.inputs.back().unwrap().time_received,
+                now - net_input.inputs.front().unwrap().time_received,
+                BUFFER_DELAY_S,
+                net_input.inputs.len(),
+                now - net_input.inputs.back().unwrap().time_received);
+            info!("(NOW {}) {:?}", now, net_input.inputs.iter().map(|input| input.time_received).collect::<Vec<_>>());
 
-        for input in net_input.inputs.drain(..) {
-            let buttons = input.key_mask;
+            continue;
+        }*/
+
+        let mut num_consumed = 0;
+        let inputs = &mut net_input.inputs;
+        assert!(!inputs.is_empty());
+        loop {
+            // Always consume at least one input
+            let input = inputs.pop_front().unwrap();
+            let buttons = input.data.key_mask;
+            if (buttons & (1 << NetKey::Left as u8)) != 0 {
+                direction -= 1.0;
+            }
+
+            if (buttons & (1 << NetKey::Right as u8)) != 0{
+                direction += 1.0;
+            }
+
+            // Calculate the new horizontal paddle position based on player input
+            let new_paddle_position =
+                paddle_transform.translation.x + direction * PADDLE_SPEED * fixed_time.delta_seconds();
+
+            // Update the paddle position,
+            // making sure it doesn't cause the paddle to leave the arena
+            paddle_transform.translation.x = new_paddle_position.clamp(PADDLE_LEFT_BOUND, PADDLE_RIGHT_BOUND);
+
+            num_consumed += 1;
+
+            if inputs.len() < BUFFER_LEN {
+                //info!("BREAK {} remaining in buffer, {} consumed", inputs.len(), num_consumed);
+                if num_consumed > 1 {
+                    info!("{} consumed to catch up, {} remaining in buffer", num_consumed, inputs.len());
+                }
+                break;
+            }
+        }
+        //info!("DRAINING {} INPUTS", net_input.inputs.len());
+        /*for input in net_input.inputs.drain(..) {
+            let buttons = input.data.key_mask;
             if (buttons & (1 << NetKey::Left as u8)) != 0 {
                 direction -= 1.0;
             }
@@ -400,7 +501,7 @@ fn move_paddles(
             // Update the paddle position,
             // making sure it doesn't cause the paddle to leave the arena
             paddle_transform.translation.x = new_paddle_position.clamp(PADDLE_LEFT_BOUND, PADDLE_RIGHT_BOUND);
-        }
+        }*/
     }
 }
 
