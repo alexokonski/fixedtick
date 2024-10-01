@@ -1,7 +1,5 @@
 use std::net::SocketAddr;
-use std::time;
 use bytes::Bytes;
-use crate::networking::SimLatencySettings;
 
 pub struct Message {
     /// The destination to send the message.

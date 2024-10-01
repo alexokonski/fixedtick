@@ -1,91 +1,21 @@
 use clap::Parser;
 mod networking;
+mod server_types;
+use crate::server_types::*;
 mod common;
-
 use common::*;
-use std::{net::UdpSocket, time, time::Duration};
-use std::collections::VecDeque;
-use std::ffi::c_void;
-use bevy::utils::HashMap;
+use std::time;
 use std::net::SocketAddr;
 use bevy::prelude::*;
 use bincode;
 use bincode::config;
 use bincode::error::DecodeError;
-use networking::{NetworkEvent, ServerPlugin, Transport, ResUdpSocket};
+use networking::{NetworkEvent, Transport, ResUdpSocket};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::SeedableRng;
-use windows::Win32::Networking::WinSock;
-use std::os::windows::io::AsRawSocket;
-use windows::Win32::Foundation;
-use crate::networking::{NetworkResource, NetworkSystem};
+use crate::networking::NetworkSystem;
 
-pub const LISTEN_ADDRESS: &str = "127.0.0.1:7001";
-const BUFFER_DELAY_S: f64 = 1.0 * TICK_S + MIN_JITTER_S;
-const BUFFER_LEN: usize = 1 + ((BUFFER_DELAY_S / TICK_S) as usize);
-const PADDLE_LEFT_BOUND: f32 = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING;
-const PADDLE_RIGHT_BOUND: f32 = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING;
-
-#[derive(Component)]
-struct NetConnection {
-    addr: SocketAddr,
-    paddle_entity: Entity,
-    ball_entity: Entity
-}
-
-#[derive(Default)]
-struct ReceivedPlayerInput {
-    data: PlayerInputData,
-    time_received: f32
-}
-
-#[derive(Clone, Copy, Default)]
-enum NetInputState {
-    #[default]
-    Buffering,
-    Playing
-}
-
-#[derive(Component, Default)]
-struct NetInput {
-    input_state: NetInputState,
-    inputs: VecDeque<ReceivedPlayerInput>,
-    pings: VecDeque<PingData> // Not a good place for this, but being fast
-}
-
-#[derive(Resource, Default)]
-struct NetConnections {
-    addr_to_entity: HashMap<SocketAddr, Entity>,    // Players are removed when they disconnect
-    next_player_index: u8
-}
-
-#[derive(Resource)]
-struct RandomGen {
-    r: ChaCha8Rng
-}
-
-#[derive(Resource)]
-struct NetIdGenerator {
-    next: u16
-}
-
-impl Default for NetIdGenerator {
-    fn default() -> Self {
-        NetIdGenerator {
-            // we want 0 to be special
-            next: 1
-        }
-    }
-}
-
-impl NetIdGenerator {
-    fn next(&mut self) -> NetId {
-        let next = self.next;
-        self.next += 1;
-        NetId(next)
-    }
-}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -212,7 +142,7 @@ fn connection_handler(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut world_resource: ResMut<FixedTickWorldResource>,
-    mut real_time: Res<Time<Real>>
+    real_time: Res<Time<Real>>
 ) {
     world_resource.frame_counter += 1;
     debug!("[{}]", world_resource.frame_counter);
@@ -401,8 +331,8 @@ fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time>
 fn process_input(
     mut client_query: Query<(&NetConnection, &mut NetInput)>,
     mut paddle_query: Query<&mut Transform, With<Paddle>>,
-    mut fixed_time: Res<Time>,
-    mut real_time: Res<Time<Real>>,
+    fixed_time: Res<Time>,
+    real_time: Res<Time<Real>>,
 ) {
     for (net_connection, mut net_input) in client_query.iter_mut() {
         let mut paddle_transform = paddle_query.get_mut(net_connection.paddle_entity).unwrap();

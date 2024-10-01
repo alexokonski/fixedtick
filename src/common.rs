@@ -1,3 +1,5 @@
+//#![allow(dead_code)]
+
 use std::time;
 use bevy::{
     math::bounding::{Aabb2d, BoundingCircle, BoundingVolume, IntersectsVolume},
@@ -6,11 +8,10 @@ use bevy::{
 };
 use serde::Serialize;
 use serde::Deserialize;
-use clap::{Parser, Args};
+use clap::Args;
 use crate::networking;
-use crate::networking::SimLatencySetting;
 
-pub const HEADER_BYTE: u8 = 0xba;
+
 pub const TICK_RATE_HZ: f64 = 60.0;
 pub const TICK_S: f64 = 1.0 / TICK_RATE_HZ;
 pub const MIN_JITTER_S: f64 = (1.0 / 1000.0) * 6.0;
@@ -18,13 +19,7 @@ pub const MIN_JITTER_S: f64 = (1.0 / 1000.0) * 6.0;
 // These constants are defined in `Transform` units.
 // Using the default 2D camera they correspond 1:1 with screen pixels.
 pub const PADDLE_SIZE: Vec2 = Vec2::new(120.0, 20.0);
-pub const GAP_BETWEEN_PADDLE_AND_FLOOR: f32 = 60.0;
-pub const PADDLE_SPEED: f32 = 500.0;
-// How close can the paddle get to the wall
-pub const PADDLE_PADDING: f32 = 10.0;
 
-// We set the z-value of the ball to 1 (WHEN SPAWNING, NOT HERE) so it renders on top in the case of overlapping sprites.
-pub const BALL_STARTING_POSITION: Vec2 = Vec2::new(0.0, -50.0);
 pub const BALL_DIAMETER: f32 = 30.;
 pub const BALL_SPEED: f32 = 400.0;
 pub const INITIAL_BALL_DIRECTION: Vec2 = Vec2::new(0.5, -0.5);
@@ -35,21 +30,13 @@ pub const LEFT_WALL: f32 = -450.;
 pub const RIGHT_WALL: f32 = 450.;
 // y coordinates
 pub const BOTTOM_WALL: f32 = -300.;
-pub const PADDLE_Y: f32 = BOTTOM_WALL + GAP_BETWEEN_PADDLE_AND_FLOOR;
+
 pub const TOP_WALL: f32 = 300.;
 
 pub const BRICK_SIZE: Vec2 = Vec2::new(100., 30.);
-// These values are exact
-pub const GAP_BETWEEN_PADDLE_AND_BRICKS: f32 = 270.0;
-pub const GAP_BETWEEN_BRICKS: f32 = 5.0;
-// These values are lower bounds, as the number of bricks is computed
-pub const GAP_BETWEEN_BRICKS_AND_CEILING: f32 = 20.0;
-pub const GAP_BETWEEN_BRICKS_AND_SIDES: f32 = 20.0;
 
 pub const SCOREBOARD_FONT_SIZE: f32 = 40.0;
 pub const SCOREBOARD_TEXT_PADDING: Val = Val::Px(5.0);
-
-pub const BACKGROUND_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 
 pub const RED: Color = Color::srgb(0.8, 0.0, 0.0);
 pub const GREEN: Color = Color::srgb(0.0, 0.8, 0.0);
@@ -62,8 +49,6 @@ pub const VIOLET: Color = Color::srgb(0.8, 0.0, 0.8);
 pub const NUM_COLORS: usize = 7;
 pub const COLORS: [Color; NUM_COLORS] = [RED, GREEN, BLUE, PURPLE, YELLOW, CYAN, VIOLET];
 
-pub const PADDLE_COLOR: Color = Color::srgb(0.3, 0.3, 0.7);
-pub const BALL_COLOR: Color = Color::srgb(1.0, 0.5, 0.5);
 pub const BRICK_COLOR: Color = Color::srgb(0.5, 0.5, 1.0);
 pub const WALL_COLOR: Color = Color::srgb(0.8, 0.8, 0.8);
 pub const TEXT_COLOR: Color = Color::srgb(0.5, 0.5, 1.0);
@@ -505,7 +490,7 @@ pub fn start_tick(
 }
 
 pub fn end_tick(
-    mut world_resource: ResMut<FixedTickWorldResource>
+    world_resource: ResMut<FixedTickWorldResource>
 ) {
     debug!("tick time: {:?}", world_resource.tick_start.unwrap().elapsed());
 }

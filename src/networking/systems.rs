@@ -1,6 +1,5 @@
 use crate::networking::{SimLatencyRollResult, SimLatencySetting, SimLatencySettings};
 use std::{io, time};
-use std::collections::VecDeque;
 use bevy::prelude::*;
 use bytes::Bytes;
 
@@ -53,7 +52,7 @@ pub fn client_recv_packet_system(
     socket: Res<ResUdpSocket>,
     mut events: EventWriter<NetworkEvent>,
     mut queue: ResMut<SimLatencyReceiveQueue>,
-    mut sim_settings: Res<SimLatencySettings>
+    sim_settings: Res<SimLatencySettings>
 ) {
     //let mut recv_count = 0;
     loop {
@@ -74,7 +73,6 @@ pub fn client_recv_packet_system(
                     &mut queue,
                     NetworkEvent::Message(address, payload, time::Instant::now())
                 );
-                //events.send(NetworkEvent::Message(address, payload, time::Instant::now()));
                 //recv_count += 1;
             }
             Err(e) => {
@@ -103,7 +101,7 @@ pub fn server_recv_packet_system(
     mut events: EventWriter<NetworkEvent>,
     mut net: ResMut<NetworkResource>,
     mut queue: ResMut<SimLatencyReceiveQueue>,
-    mut sim_settings: Res<SimLatencySettings>
+    sim_settings: Res<SimLatencySettings>
 ) {
     loop {
         let mut buf = [0; ETHERNET_MTU];

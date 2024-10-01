@@ -3,7 +3,6 @@ mod message;
 pub mod systems;
 pub mod transport;
 
-use crate::networking::message::Message;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::net::{SocketAddr, UdpSocket};
@@ -216,10 +215,13 @@ impl ResUdpSocket {
 
         socket
     }
+
+    #[allow(dead_code)]
     pub fn new_client(remote_addr: SocketAddr) -> Self {
         Self::new("0.0.0.0:0", Some(remote_addr))
     }
 
+    #[allow(dead_code)]
     pub fn new_server(local_bind: &str) -> Self {
         Self::new(local_bind, None)
     }

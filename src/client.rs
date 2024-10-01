@@ -5,7 +5,6 @@ mod common;
 use std::collections::VecDeque;
 use common::*;
 
-use std::net::{UdpSocket};
 use std::time;
 use bincode::config;
 use bincode::error::DecodeError;
@@ -14,9 +13,7 @@ use bevy::utils::HashMap;
 use networking::{ClientPlugin, NetworkEvent, ResSocketAddr, ResUdpSocket, Transport};
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use iyes_perf_ui::prelude::*;
-use crate::networking::{transport, NetworkSystem};
-//use itertools::Itertools;
-//use std::time::{Instant};
+use crate::networking::NetworkSystem;
 
 const INTERP_DELAY_S: f64 = TICK_S + MIN_JITTER_S;
 
@@ -35,10 +32,10 @@ struct PingState {
     pongs: Vec<PingData>
 }
 
-#[derive(Resource)]
-struct PastClientInputs {
-    inputs: Vec<PlayerInputData>
-}
+//#[derive(Resource)]
+//struct PastClientInputs {
+//    inputs: Vec<PlayerInputData>
+//}
 
 #[derive(Resource, Default)]
 struct NetIdToEntityId {
@@ -131,7 +128,7 @@ fn connection_handler(
     //let mut recv_count = 0;
     for event in events.read() {
         match event {
-            NetworkEvent::Message(handle, msg, recv_time) => {
+            NetworkEvent::Message(handle, msg, _) => {
                 let config = config::standard();
 
                 type ServerToClientResult = Result<(ServerToClientPacket, usize), DecodeError>;
