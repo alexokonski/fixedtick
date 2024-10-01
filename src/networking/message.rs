@@ -1,15 +1,13 @@
 use std::net::SocketAddr;
 use std::time;
 use bytes::Bytes;
-use crate::networking::transport::SimLatencySettings;
+use crate::networking::SimLatencySettings;
 
 pub struct Message {
     /// The destination to send the message.
     pub destination: SocketAddr,
     /// The serialized payload itself.
     pub payload: Bytes,
-    // Optional send time
-    //pub send_time: Option<time::Instant>,
 }
 
 impl Message {

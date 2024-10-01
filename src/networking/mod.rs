@@ -3,7 +3,8 @@ mod message;
 pub mod systems;
 pub mod transport;
 
-use std::collections::HashMap;
+use crate::networking::message::Message;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
@@ -17,6 +18,9 @@ use bevy::prelude::*;
 use windows::Win32::Foundation;
 use windows::Win32::Networking::WinSock;
 use std::os::windows::io::AsRawSocket;
+use std::time;
+use rand::Rng;
+use rand_distr::{Normal, Distribution};
 
 /// Defines how many times a client automatically sends a heartbeat packet.
 /// This should be no more than half of idle_timeout.
@@ -34,11 +38,17 @@ pub struct NetworkResource {
     pub idle_timeout: Duration,
 }
 
+#[derive(Resource, Default)]
+pub struct SimLatencyReceiveQueue {
+    pub sim_latency_delayed: VecDeque<NetworkEvent>,
+    pub sim_latency_delivery_times: VecDeque<time::Instant>,
+}
+
 impl Default for NetworkResource {
     fn default() -> Self {
         Self {
             connections: Default::default(),
-            idle_timeout: Duration::from_secs_f32(DEFAULT_IDLE_TIMEOUT_SECS)
+            idle_timeout: Duration::from_secs_f32(DEFAULT_IDLE_TIMEOUT_SECS),
         }
     }
 }
@@ -62,15 +72,80 @@ pub enum ClientSystem {
     Heartbeat,
 }
 
+
+#[derive(Default, Clone)]
+pub struct SimLatency {
+    pub base_ms: u32,
+    pub jitter_stddev_ms: u32
+}
+
+#[derive(Default, Clone)]
+pub struct SimLoss {
+    pub loss_chance: f32 // just a roll per packet right now
+}
+
+#[derive(Default, Clone)]
+pub struct SimLatencySetting {
+    pub latency: SimLatency,
+    pub loss: SimLoss
+}
+
+pub enum SimLatencyRollResult {
+    NoOp,
+    Drop,
+    Delay(time::Instant)
+}
+
+impl SimLatencySetting {
+    fn is_set(&self) -> bool {
+        self.latency.base_ms != 0 ||
+            self.latency.jitter_stddev_ms != 0 ||
+            self.loss.loss_chance != 0.0
+    }
+
+    fn roll(&self) -> SimLatencyRollResult {
+        if !self.is_set() {
+            return SimLatencyRollResult::NoOp;
+        }
+
+        let rng = &mut rand::thread_rng();
+        if self.loss.loss_chance > 0.0 &&
+            rng.gen_range(0.0..=1.0) <= self.loss.loss_chance {
+            return SimLatencyRollResult::Drop;
+        }
+
+        let now = time::Instant::now();
+        if self.latency.jitter_stddev_ms > 0 || self.latency.base_ms > 0 {
+            let normal = Normal::new(self.latency.base_ms as f64, self.latency.jitter_stddev_ms as f64).unwrap();
+            let value = normal.sample(rng);
+            if value > 0.0 {
+                return SimLatencyRollResult::Delay(now + time::Duration::from_millis(value as u64));
+            } else {
+                return SimLatencyRollResult::Delay(now);
+            }
+        }
+
+        SimLatencyRollResult::Delay(now)
+    }
+}
+
+#[derive(Resource, Default, Clone)]
+pub struct SimLatencySettings {
+    pub send: SimLatencySetting,
+    pub receive: SimLatencySetting,
+}
+
 #[derive(Default)]
 pub struct ServerPlugin {
-    pub sim_settings: transport::SimLatencySettings,
+    pub sim_settings: SimLatencySettings,
     pub no_systems: bool
 }
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(NetworkResource::default())
-            .insert_resource(transport::Transport::new(self.sim_settings.clone()))
+            .insert_resource(transport::Transport::new(self.sim_settings.send.clone()))
+            .insert_resource(self.sim_settings.clone())
+            .insert_resource(SimLatencyReceiveQueue::default())
             .add_event::<events::NetworkEvent>();
 
         if !self.no_systems {
@@ -91,7 +166,7 @@ pub struct HeartbeatTimer(pub Timer);
 
 #[derive(Default)]
 pub struct ClientPlugin {
-    pub sim_settings: transport::SimLatencySettings,
+    pub sim_settings: SimLatencySettings,
     pub no_systems: bool
 }
 
@@ -155,11 +230,13 @@ pub struct ResSocketAddr(pub(crate) SocketAddr);
 
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(transport::Transport::new(self.sim_settings.clone()))
+        app.insert_resource(transport::Transport::new(self.sim_settings.send.clone())) // copy send settings for ease of use
+            .insert_resource(self.sim_settings.clone())
             .insert_resource(HeartbeatTimer(Timer::from_seconds(
                 DEFAULT_HEARTBEAT_TICK_RATE_SECS,
                 TimerMode::Repeating,
             )))
+            .insert_resource(SimLatencyReceiveQueue::default())
             .add_event::<events::NetworkEvent>();
 
         if !self.no_systems {

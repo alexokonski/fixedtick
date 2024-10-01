@@ -1,3 +1,5 @@
+use crate::networking::SimLatencyRollResult;
+use crate::networking::SimLatencySetting;
 use std::{collections::VecDeque, net::SocketAddr};
 
 use super::message::Message;
@@ -7,91 +9,29 @@ use bevy::prelude::*;
 use rand::Rng;
 use rand_distr::{Normal, Distribution};
 
-#[derive(Default, Clone)]
-pub struct SimLatency {
-    pub base_ms: u32,
-    pub jitter_stddev_ms: u32
-}
-
-#[derive(Default, Clone)]
-pub struct SimLoss {
-    pub loss_chance: f32 // just a roll per packet right now
-}
-
-#[derive(Default, Clone)]
-pub struct SimLatencySetting {
-    pub latency: SimLatency,
-    pub loss: SimLoss
-}
-
-pub enum SimLatencyRollResult {
-    NoOp,
-    Drop,
-    Delay(time::Instant)
-}
-
-impl SimLatencySetting {
-    fn is_set(&self) -> bool {
-        self.latency.base_ms != 0 ||
-            self.latency.jitter_stddev_ms != 0 ||
-            self.loss.loss_chance != 0.0
-    }
-
-    fn roll(&self) -> SimLatencyRollResult {
-        if !self.is_set() {
-            return SimLatencyRollResult::NoOp;
-        }
-
-        let rng = &mut rand::thread_rng();
-        if self.loss.loss_chance > 0.0 &&
-            rng.gen_range(0.0..=1.0) <= self.loss.loss_chance {
-            return SimLatencyRollResult::Drop;
-        }
-
-        let now = time::Instant::now();
-        if self.latency.jitter_stddev_ms > 0 || self.latency.base_ms > 0 {
-            let normal = Normal::new(self.latency.base_ms as f64, self.latency.jitter_stddev_ms as f64).unwrap();
-            let value = normal.sample(rng);
-            if value > 0.0 {
-                return SimLatencyRollResult::Delay(now + time::Duration::from_millis(value as u64));
-            } else {
-                return SimLatencyRollResult::Delay(now);
-            }
-        }
-
-        SimLatencyRollResult::Delay(now)
-    }
-}
-
-#[derive(Default, Clone)]
-pub struct SimLatencySettings {
-    pub send: SimLatencySetting,
-    pub receive: SimLatencySetting,
-}
-
 /// Resource serving as the owner of the queue of messages to be sent. This resource also serves
 /// as the interface for other systems to send messages.
 #[derive(bevy::prelude::Resource)]
 pub struct Transport {
     messages: VecDeque<Message>,
-    sim_settings: SimLatencySettings,
     sim_send_times: VecDeque<time::Instant>, // parallel to messages
+    sim_send_settings: SimLatencySetting,
 }
 
 impl Transport {
     /// Creates a new `Transport`.
-    pub fn new(sim_settings: SimLatencySettings) -> Self {
+    pub fn new(sim_send_settings: SimLatencySetting) -> Self {
         Self {
             messages: VecDeque::new(),
             sim_send_times: VecDeque::new(),
-            sim_settings,
+            sim_send_settings,
         }
     }
 
     /// Creates a `Message` with the default guarantees provided by the `Socket` implementation and
     /// pushes it onto the messages queue to be sent on the next frame.
     pub fn send(&mut self, destination: SocketAddr, payload: &[u8]) {
-        match self.sim_settings.send.roll() {
+        match self.sim_send_settings.roll() {
             SimLatencyRollResult::NoOp => {},
             SimLatencyRollResult::Drop => return,
             SimLatencyRollResult::Delay(t) => {
@@ -126,7 +66,7 @@ impl Transport {
         &mut self,
         mut filter: impl FnMut(&mut Message) -> bool,
     ) -> Vec<Message> {
-        let using_send_sim = self.sim_settings.send.is_set();
+        let using_send_sim = self.sim_send_settings.is_set();
         if using_send_sim {
             assert_eq!(self.messages.len(), self.sim_send_times.len());
         } else {
@@ -160,7 +100,7 @@ impl Default for Transport {
     fn default() -> Self {
         Self {
             messages: VecDeque::new(),
-            sim_settings: Default::default(),
+            sim_send_settings: Default::default(),
             sim_send_times: VecDeque::new(),
         }
     }
@@ -229,6 +169,6 @@ mod tests {
     }
 
     fn create_test_transport() -> Transport {
-        Transport::new(SimLatencySettings::default())
+        Transport::new(SimLatencySetting::default())
     }
 }

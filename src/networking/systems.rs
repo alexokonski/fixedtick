@@ -1,5 +1,6 @@
+use crate::networking::{SimLatencyRollResult, SimLatencySetting, SimLatencySettings};
 use std::{io, time};
-
+use std::collections::VecDeque;
 use bevy::prelude::*;
 use bytes::Bytes;
 
@@ -7,9 +8,53 @@ use crate::networking::{HeartbeatTimer, ETHERNET_MTU};
 use crate::networking::ResUdpSocket;
 use crate::networking::ResSocketAddr;
 
-use super::{events::NetworkEvent, transport::Transport, NetworkResource};
+use super::{events::NetworkEvent, transport::Transport, NetworkResource, SimLatencyReceiveQueue};
 
-pub fn client_recv_packet_system(socket: Res<ResUdpSocket>, mut events: EventWriter<NetworkEvent>) {
+fn send_with_sim_latency(
+    receive_setting: &SimLatencySetting,
+    events: &mut EventWriter<NetworkEvent>,
+    queue: &mut SimLatencyReceiveQueue,
+    event: NetworkEvent
+) {
+    match receive_setting.roll() {
+        SimLatencyRollResult::NoOp => {
+            events.send(event);
+        },
+        SimLatencyRollResult::Drop => {},
+        SimLatencyRollResult::Delay(t) => {
+            queue.sim_latency_delayed.push_back(event);
+
+            let pos = queue.sim_latency_delivery_times.binary_search(&t).unwrap_or_else(|p| p);
+            queue.sim_latency_delivery_times.insert(pos, t);
+        }
+    };
+}
+
+fn process_sim_latency(
+    events: &mut EventWriter<NetworkEvent>,
+    queue: &mut SimLatencyReceiveQueue,
+) {
+    let now = time::Instant::now();
+
+    assert_eq!(queue.sim_latency_delayed.len(), queue.sim_latency_delivery_times.len());
+    let delayed_events = &mut queue.sim_latency_delayed;
+    let mut i = 0;
+    while i != delayed_events.len() {
+        if now >= queue.sim_latency_delivery_times[i] {
+            events.send(delayed_events.remove(i).unwrap());
+            queue.sim_latency_delivery_times.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+pub fn client_recv_packet_system(
+    socket: Res<ResUdpSocket>,
+    mut events: EventWriter<NetworkEvent>,
+    mut queue: ResMut<SimLatencyReceiveQueue>,
+    mut sim_settings: Res<SimLatencySettings>
+) {
     //let mut recv_count = 0;
     loop {
         let mut buf = [0; ETHERNET_MTU];
@@ -23,13 +68,24 @@ pub fn client_recv_packet_system(socket: Res<ResUdpSocket>, mut events: EventWri
                 }
 
                 //debug!("{:?} received payload {:?} from {}", time::Instant::now() payload, address);
-
-                events.send(NetworkEvent::Message(address, payload, time::Instant::now()));
+                send_with_sim_latency(
+                    &sim_settings.receive,
+                    &mut events,
+                    &mut queue,
+                    NetworkEvent::Message(address, payload, time::Instant::now())
+                );
+                //events.send(NetworkEvent::Message(address, payload, time::Instant::now()));
                 //recv_count += 1;
             }
             Err(e) => {
                 if e.kind() != io::ErrorKind::WouldBlock {
-                    events.send(NetworkEvent::RecvError(e));
+                    //events.send(NetworkEvent::RecvError(e));
+                    send_with_sim_latency(
+                        &sim_settings.receive,
+                        &mut events,
+                        &mut queue,
+                        NetworkEvent::RecvError(e)
+                    );
                 }
 
                 // break loop when no messages are left to read this frame
@@ -38,6 +94,7 @@ pub fn client_recv_packet_system(socket: Res<ResUdpSocket>, mut events: EventWri
         }
     }
     //info!("{} msg this frame", recv_count);
+    process_sim_latency(&mut events, &mut queue);
 }
 
 pub fn server_recv_packet_system(
@@ -45,6 +102,8 @@ pub fn server_recv_packet_system(
     socket: Res<ResUdpSocket>,
     mut events: EventWriter<NetworkEvent>,
     mut net: ResMut<NetworkResource>,
+    mut queue: ResMut<SimLatencyReceiveQueue>,
+    mut sim_settings: Res<SimLatencySettings>
 ) {
     loop {
         let mut buf = [0; ETHERNET_MTU];
@@ -57,7 +116,13 @@ pub fn server_recv_packet_system(
                     .is_none()
                 {
                     // connection established
-                    events.send(NetworkEvent::Connected(address));
+                    //events.send(NetworkEvent::Connected(address));
+                    send_with_sim_latency(
+                        &sim_settings.receive,
+                        &mut events,
+                        &mut queue,
+                        NetworkEvent::Connected(address)
+                    );
                 }
                 if payload.len() == 0 {
                     debug!("{}: received heartbeat packet", address);
@@ -65,18 +130,32 @@ pub fn server_recv_packet_system(
                     continue;
                 }
                 let now = time::Instant::now();
+                let msg = NetworkEvent::Message(address, payload, now);
                 //debug!("{:?} received payload {:?} from {}", now, payload, address);
-                events.send(NetworkEvent::Message(address, payload, now));
+                send_with_sim_latency(
+                    &sim_settings.receive,
+                    &mut events,
+                    &mut queue,
+                    msg
+                );
             }
             Err(e) => {
                 if e.kind() != io::ErrorKind::WouldBlock {
-                    events.send(NetworkEvent::RecvError(e));
+                    send_with_sim_latency(
+                        &sim_settings.receive,
+                        &mut events,
+                        &mut queue,
+                        NetworkEvent::RecvError(e)
+                    );
                 }
                 // break loop when no messages are left to read this frame
                 break;
             }
         }
     }
+
+    // Process sim latency
+    process_sim_latency(&mut events, &mut queue);
 }
 
 pub fn send_packet_system(

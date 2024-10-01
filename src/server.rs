@@ -92,18 +92,20 @@ impl NetIdGenerator {
 struct Args {
     #[arg(long, default_value = LISTEN_ADDRESS)]
     bind: String,
+
+    #[command(flatten)]
+    sim_latency: SimLatencyArgs
 }
 
 fn main() {
     let args = Args::parse();
-
     let socket = ResUdpSocket::new_server(&args.bind);
-
     let rng = RandomGen{ r: ChaCha8Rng::seed_from_u64(1337) };
+    let generator = NetIdGenerator::default();
+
+    let sim_settings = args.sim_latency.into();
 
     println!("Server now listening on {}", args.bind);
-
-    let generator = NetIdGenerator::default();
 
     App::new()
         .insert_resource(bevy::winit::WinitSettings {
@@ -113,7 +115,7 @@ fn main() {
         .insert_resource(socket)
         .insert_resource(rng)
         .add_plugins(DefaultPlugins)
-        .add_plugins(networking::ServerPlugin{sim_settings: Default::default(), no_systems: true})
+        .add_plugins(networking::ServerPlugin{sim_settings, no_systems: true})
         .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
         .insert_resource(Score(0))
         .insert_resource(ClearColor(BACKGROUND_COLOR))

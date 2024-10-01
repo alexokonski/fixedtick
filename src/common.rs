@@ -7,6 +7,8 @@ use bevy::{
 use serde::Serialize;
 use serde::Deserialize;
 use clap::{Parser, Args};
+use crate::networking;
+use crate::networking::SimLatencySetting;
 
 pub const HEADER_BYTE: u8 = 0xba;
 pub const TICK_RATE_HZ: f64 = 60.0;
@@ -522,3 +524,29 @@ pub struct SimLatencyArgs {
     #[arg(long, default_value_t = 0)]
     pub recv_jitter_stddev_ms: u32,
 }
+
+impl From<SimLatencyArgs> for networking::SimLatencySettings {
+    fn from(value: SimLatencyArgs) -> Self {
+        networking::SimLatencySettings {
+            send: networking::SimLatencySetting {
+                latency: networking::SimLatency {
+                    base_ms: value.send_sim_latency_ms,
+                    jitter_stddev_ms: value.send_jitter_stddev_ms
+                },
+                loss: networking::SimLoss {
+                    loss_chance: 0.0
+                }
+            },
+            receive: networking::SimLatencySetting {
+                latency: networking::SimLatency {
+                    base_ms: value.recv_sim_latency_ms,
+                    jitter_stddev_ms: value.recv_jitter_stddev_ms
+                },
+                loss: networking::SimLoss {
+                    loss_chance: 0.0
+                }
+            }
+        }
+    }
+}
+

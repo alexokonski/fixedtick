@@ -71,26 +71,7 @@ fn main() {
     //let addr = socket.0.local_addr().unwrap();
     //println!("local socket addr: {}", addr);
     let res_addr = ResSocketAddr(remote_addr);
-    let sim_settings = transport::SimLatencySettings {
-        send: transport::SimLatencySetting {
-            latency: transport::SimLatency {
-                base_ms: args.sim_latency.send_sim_latency_ms,
-                jitter_stddev_ms: args.sim_latency.send_jitter_stddev_ms
-            },
-            loss: transport::SimLoss {
-                loss_chance: 0.0
-            }
-        },
-        receive: transport::SimLatencySetting {
-            latency: transport::SimLatency {
-                base_ms: args.sim_latency.recv_sim_latency_ms,
-                jitter_stddev_ms: args.sim_latency.recv_jitter_stddev_ms
-            },
-            loss: transport::SimLoss {
-                loss_chance: 0.0
-            }
-        }
-    };
+    let sim_settings = args.sim_latency.into();
 
     App::new()
         .insert_resource(bevy::winit::WinitSettings {
