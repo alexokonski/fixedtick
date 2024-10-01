@@ -406,7 +406,6 @@ fn process_input(
         let mut paddle_transform = paddle_query.get_mut(net_connection.paddle_entity).unwrap();
         let mut direction = 0.0;
 
-
         let input_state = net_input.input_state;
         match input_state {
             NetInputState::Buffering => {
@@ -429,26 +428,6 @@ fn process_input(
                 }
             }
         }
-
-        /*if net_input.inputs.is_empty()  {
-            info!("EMPTY INPUTS");
-            continue;
-        }
-
-        let now = real_time.elapsed_seconds();
-        if now - net_input.inputs.front().unwrap().time_received < BUFFER_DELAY_S {
-            info!("{} {} {} BUFFERING INPUT {} < {} BACK DIFF (len {}) {} ",
-                now,
-                net_input.inputs.front().unwrap().time_received,
-                net_input.inputs.back().unwrap().time_received,
-                now - net_input.inputs.front().unwrap().time_received,
-                BUFFER_DELAY_S,
-                net_input.inputs.len(),
-                now - net_input.inputs.back().unwrap().time_received);
-            info!("(NOW {}) {:?}", now, net_input.inputs.iter().map(|input| input.time_received).collect::<Vec<_>>());
-
-            continue;
-        }*/
 
         let mut num_consumed = 0;
         let inputs = &mut net_input.inputs;
@@ -483,36 +462,5 @@ fn process_input(
                 break;
             }
         }
-        //info!("DRAINING {} INPUTS", net_input.inputs.len());
-        /*for input in net_input.inputs.drain(..) {
-            let buttons = input.data.key_mask;
-            if (buttons & (1 << NetKey::Left as u8)) != 0 {
-                direction -= 1.0;
-            }
-
-            if (buttons & (1 << NetKey::Right as u8)) != 0{
-                direction += 1.0;
-            }
-
-            // Calculate the new horizontal paddle position based on player input
-            let new_paddle_position =
-                paddle_transform.translation.x + direction * PADDLE_SPEED * time.delta_seconds();
-
-            // Update the paddle position,
-            // making sure it doesn't cause the paddle to leave the arena
-            paddle_transform.translation.x = new_paddle_position.clamp(PADDLE_LEFT_BOUND, PADDLE_RIGHT_BOUND);
-        }*/
     }
 }
-
-
-/*fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_systems(Update, hello_world_system)
-        .run();
-}
-
-fn hello_world_system() {
-    println!("hello world");
-}*/
