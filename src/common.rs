@@ -11,7 +11,8 @@ use serde::Deserialize;
 use clap::Args;
 use crate::networking;
 
-
+pub const WORLD_PACKET_HEADER_TAG: u32 = 0xba11ba11;
+pub const HEADER_LEN: usize = size_of::<u32>() * 2 + size_of::<u8>();
 pub const TICK_RATE_HZ: f64 = 60.0;
 pub const TICK_S: f64 = 1.0 / TICK_RATE_HZ;
 pub const MIN_JITTER_S: f64 = (1.0 / 1000.0) * 6.0;
@@ -158,7 +159,7 @@ pub enum NetKey {
     Right,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 pub struct PlayerInputData {
     pub key_mask: u8,
     pub simulating_frame: u32,
@@ -190,6 +191,7 @@ pub struct NetBrickData {
 #[derive(Deserialize, Serialize)]
 pub struct NetBallData {
     pub pos: Vec2,
+    pub velocity: Vec2, // experimental for not predicting collisions
     pub player_index: NetPlayerIndex
 }
 
@@ -219,15 +221,14 @@ pub struct NetEntity {
 }
 
 #[derive(Deserialize, Serialize, Default)]
-pub struct WorldStateData {
+pub struct NetWorldStateData {
     pub frame: u32,
     pub entities: Vec<NetEntity>,
-    //pub entities_removed: Vec<NetId> don't do this, losing removes on lost (or eaten) packets is bad
 }
 
 #[derive(Deserialize, Serialize)]
 pub enum ServerToClientPacket {
-    WorldState(WorldStateData),
+    WorldState(NetWorldStateData),
     Pong(PingData)
 }
 
@@ -238,7 +239,6 @@ enum Collision {
     Top,
     Bottom,
 }
-
 
 // Returns `Some` if `ball` collides with `bounding_box`.
 // The returned `Collision` is the side of `bounding_box` that `ball` hit.
@@ -323,6 +323,31 @@ pub fn check_for_collisions(
             }
         }
     }
+}
+
+pub const PADDLE_SPEED: f32 = 500.0;
+pub const PADDLE_PADDING: f32 = 10.0;
+pub const PADDLE_LEFT_BOUND: f32 = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING;
+pub const PADDLE_RIGHT_BOUND: f32 = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING;
+
+pub fn move_paddle(delta_seconds: f32, paddle_transform: &mut Transform, input: &PlayerInputData) {
+    let buttons = input.key_mask;
+    let mut direction = 0.0;
+    if (buttons & (1 << NetKey::Left as u8)) != 0 {
+        direction -= 1.0;
+    }
+
+    if (buttons & (1 << NetKey::Right as u8)) != 0{
+        direction += 1.0;
+    }
+
+    // Calculate the new horizontal paddle position based on player input
+    let new_paddle_position =
+        paddle_transform.translation.x + direction * PADDLE_SPEED * delta_seconds;
+
+    // Update the paddle position,
+    // making sure it doesn't cause the paddle to leave the arena
+    paddle_transform.translation.x = new_paddle_position.clamp(PADDLE_LEFT_BOUND, PADDLE_RIGHT_BOUND);
 }
 
 pub fn update_scoreboard(score: Res<Score>, mut query: Query<&mut Text, With<ScoreboardUi>>) {
@@ -424,27 +449,6 @@ impl BrickBundle {
     }
 }
 
-/*pub fn spawn_brick(commands: &mut Commands, brick_position: Vec2, net_id: NetId) -> EntityCommands {
-    // brick
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: BRICK_COLOR,
-                ..default()
-            },
-            transform: Transform {
-                translation: brick_position.extend(0.0),
-                scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0),
-                ..default()
-            },
-            ..default()
-        },
-        Brick,
-        Collider,
-        net_id
-    ))
-}*/
-
 #[derive(Bundle)]
 pub struct ScoreboardUiBundle {
     scoreboard_ui: ScoreboardUi,
@@ -534,4 +538,3 @@ impl From<SimLatencyArgs> for networking::SimLatencySettings {
         }
     }
 }
-

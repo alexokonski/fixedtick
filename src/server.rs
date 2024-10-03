@@ -15,7 +15,7 @@ use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::SeedableRng;
 use crate::networking::NetworkSystem;
-
+use byteorder::ByteOrder;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -42,10 +42,10 @@ fn main() {
             focused_mode: bevy::winit::UpdateMode::Continuous,
             unfocused_mode: bevy::winit::UpdateMode::Continuous,
         })
-        .insert_resource(socket)
-        .insert_resource(rng)
         .add_plugins(DefaultPlugins)
         .add_plugins(networking::ServerPlugin{sim_settings, no_systems: true})
+        .insert_resource(socket)
+        .insert_resource(rng)
         .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
         .insert_resource(Score(0))
         .insert_resource(ClearColor(BACKGROUND_COLOR))
@@ -162,7 +162,9 @@ fn connection_handler(
                     NetConnection {
                         addr: *handle,
                         paddle_entity,
-                        ball_entity
+                        ball_entity,
+                        last_applied_input: 0,
+                        player_index: next_player.0
                     },
                     NetInput::default()
                 )).id();
@@ -255,9 +257,15 @@ fn handle_client_disconnected(
     }
 }
 
+fn write_header(buf: &mut [u8], conn: &NetConnection) {
+    byteorder::NetworkEndian::write_u32(buf, WORLD_PACKET_HEADER_TAG);
+    byteorder::NetworkEndian::write_u32(&mut buf[size_of::<u32>()..], conn.last_applied_input);
+    buf[size_of::<u32>() * 2] = conn.player_index;
+}
+
 fn broadcast_world_state(
     bricks: Query<(&Transform, &NetId), With<Brick>>,
-    balls: Query<(&Transform, &NetId, &NetPlayerIndex) , With<Ball>>,
+    balls: Query<(&Transform, &NetId, &Velocity, &NetPlayerIndex) , With<Ball>>,
     paddles: Query<(&Transform, &NetId, &NetPlayerIndex), With<Paddle>>,
     score: Res<Score>,
     mut transport: ResMut<Transport>,
@@ -271,7 +279,7 @@ fn broadcast_world_state(
 
     // This is definitely not as fast as it could be. Hand-serializing
     // directly into a buffer is probably faster than first copying into here?
-    let mut world = WorldStateData::default();
+    let mut world = NetWorldStateData::default();
     world.frame = world_resource.frame_counter;
     for (transform, &id) in bricks.iter() {
         world.entities.push(NetEntity {
@@ -280,9 +288,9 @@ fn broadcast_world_state(
         });
     }
 
-    for (transform, &id, &player) in balls.iter() {
+    for (transform, &id, velocity, &player) in balls.iter() {
         world.entities.push(NetEntity {
-            entity_type: NetEntityType::Ball(NetBallData { pos: transform.translation.xy(), player_index: player }),
+            entity_type: NetEntityType::Ball(NetBallData { pos: transform.translation.xy(), velocity: velocity.0, player_index: player }),
             net_id: id
         });
     }
@@ -302,15 +310,23 @@ fn broadcast_world_state(
     // Will just blow up if world state gets to big, fine by me right now
     let packet = ServerToClientPacket::WorldState(world);
     let mut world_state_buf = [0; networking::ETHERNET_MTU];
-    let num_bytes = bincode::serde::encode_into_slice(packet, &mut world_state_buf, config::standard()).unwrap();
+    byteorder::NetworkEndian::write_u32(&mut world_state_buf, WORLD_PACKET_HEADER_TAG);
+    // A U32 HERE will be the only one changed, min serialization overhead
+
+    let num_bytes = HEADER_LEN + bincode::serde::encode_into_slice(packet, &mut world_state_buf[HEADER_LEN..], config::standard()).unwrap();
 
     for (conn, mut input) in client_query.iter_mut() {
+        // Hand-serializing only the data that changes. This means we do the least serialization per client
+        byteorder::NetworkEndian::write_u32(&mut world_state_buf[size_of::<u32>()..], conn.last_applied_input);
+        world_state_buf[size_of::<u32>() * 2] = conn.player_index;
         transport.send(conn.addr, &world_state_buf[..num_bytes]);
 
         let mut ping_buf = [0; networking::ETHERNET_MTU];
+        write_header(&mut ping_buf, conn);
+
         for ping in &input.pings {
             let packet = ServerToClientPacket::Pong(ping.clone());
-            let num_bytes = bincode::serde::encode_into_slice(packet, &mut ping_buf, config::standard()).unwrap();
+            let num_bytes = HEADER_LEN + bincode::serde::encode_into_slice(packet, &mut ping_buf[HEADER_LEN..], config::standard()).unwrap();
 
             debug!("Sent ping {} to {} at {:?}", ping.ping_id, conn.addr, time::Instant::now());
 
@@ -320,7 +336,7 @@ fn broadcast_world_state(
     }
 }
 
-fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time>) {
+fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time<Fixed>>) {
     for (mut transform, velocity) in &mut query {
         transform.translation.x += velocity.x * time.delta_seconds();
         transform.translation.y += velocity.y * time.delta_seconds();
@@ -329,14 +345,13 @@ fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time>
 
 // Not good strict ECS because i'm mutating both input and transforms in the same system, should maybe be broken up with events?
 fn process_input(
-    mut client_query: Query<(&NetConnection, &mut NetInput)>,
+    mut client_query: Query<(&mut NetConnection, &mut NetInput)>,
     mut paddle_query: Query<&mut Transform, With<Paddle>>,
-    fixed_time: Res<Time>,
+    fixed_time: Res<Time<Fixed>>,
     real_time: Res<Time<Real>>,
 ) {
-    for (net_connection, mut net_input) in client_query.iter_mut() {
+    for (mut net_connection, mut net_input) in client_query.iter_mut() {
         let mut paddle_transform = paddle_query.get_mut(net_connection.paddle_entity).unwrap();
-        let mut direction = 0.0;
 
         let input_state = net_input.input_state;
         match input_state {
@@ -362,29 +377,17 @@ fn process_input(
         }
 
         let mut num_consumed = 0;
+        let mut last_consumed;
         let inputs = &mut net_input.inputs;
         assert!(!inputs.is_empty());
         loop {
             // Always consume at least one input
             let input = inputs.pop_front().unwrap();
-            let buttons = input.data.key_mask;
-            if (buttons & (1 << NetKey::Left as u8)) != 0 {
-                direction -= 1.0;
-            }
 
-            if (buttons & (1 << NetKey::Right as u8)) != 0{
-                direction += 1.0;
-            }
-
-            // Calculate the new horizontal paddle position based on player input
-            let new_paddle_position =
-                paddle_transform.translation.x + direction * PADDLE_SPEED * fixed_time.delta_seconds();
-
-            // Update the paddle position,
-            // making sure it doesn't cause the paddle to leave the arena
-            paddle_transform.translation.x = new_paddle_position.clamp(PADDLE_LEFT_BOUND, PADDLE_RIGHT_BOUND);
+            move_paddle(fixed_time.delta_seconds(), &mut paddle_transform, &input.data);
 
             num_consumed += 1;
+            last_consumed = input.data.sequence;
 
             if inputs.len() < BUFFER_LEN {
                 //info!("BREAK {} remaining in buffer, {} consumed", inputs.len(), num_consumed);
@@ -394,5 +397,7 @@ fn process_input(
                 break;
             }
         }
+
+        net_connection.last_applied_input = last_consumed;
     }
 }

@@ -12,16 +12,25 @@ use bevy::{prelude::*};
 use bevy::utils::HashMap;
 use networking::{ClientPlugin, NetworkEvent, ResSocketAddr, ResUdpSocket, Transport};
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
+use byteorder::ByteOrder;
 use iyes_perf_ui::prelude::*;
 use crate::networking::NetworkSystem;
 
 const INTERP_DELAY_S: f64 = TICK_S + MIN_JITTER_S;
 
+struct ClientWorldState {
+    world: NetWorldStateData,
+    last_applied_input: u32,
+    local_client_index: u8
+}
+
 #[derive(Resource, Default)]
 struct WorldStates {
-    states: Vec<WorldStateData>,
+    states: VecDeque<ClientWorldState>,
     interp_started: bool,
     received_per_sec: VecDeque<f32>,
+    interpolating_from: Option<u32>,
+    interpolating_to: Option<u32>
 }
 
 #[derive(Resource)]
@@ -32,10 +41,12 @@ struct PingState {
     pongs: Vec<PingData>
 }
 
-//#[derive(Resource)]
-//struct PastClientInputs {
-//    inputs: Vec<PlayerInputData>
-//}
+// Parallel vectors
+#[derive(Resource, Default)]
+struct UnAckedPlayerInputs {
+    inputs: VecDeque<PlayerInputData>,
+    //predicted_world_states: VecDeque<NetWorldStateData>
+}
 
 #[derive(Resource, Default)]
 struct NetIdToEntityId {
@@ -47,6 +58,9 @@ struct InterpolatedTransform {
     from: Transform,
     to: Transform,
 }
+
+#[derive(Component)]
+struct LocallyPredicted;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -88,6 +102,7 @@ fn main() {
             pongs: Vec::default()
         })
         .insert_resource(FixedTickWorldResource::default())
+        .insert_resource(UnAckedPlayerInputs::default())
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(PerfUiPlugin)
         .add_plugins(DefaultPlugins)
@@ -108,6 +123,7 @@ fn main() {
                 networking::systems::client_recv_packet_system.in_set(NetworkSystem::Receive),
                 send_input,
                 connection_handler,
+                reconcile_and_update_predictions,
                 ping_server,
                 tick_simulation,
                 update_scoreboard,
@@ -130,14 +146,32 @@ fn connection_handler(
         match event {
             NetworkEvent::Message(handle, msg, _) => {
                 let config = config::standard();
+                if msg.len() < HEADER_LEN + 1 {
+                    warn!("Packet too small, ignoring");
+                    continue;
+                }
 
+                let msg_slice = msg.as_ref();
+
+                let header_tag = byteorder::NetworkEndian::read_u32(msg_slice);
+                if header_tag != WORLD_PACKET_HEADER_TAG {
+                    warn!("Invalid tag, ignoring");
+                    continue;
+                }
+
+                // This is gross but I wanted to stay simple, there is no framing, every message has all needed data
+                // This allows the server to serialize the world state once
+                let last_applied_input = byteorder::NetworkEndian::read_u32(&msg_slice[size_of::<u32>()..]);
+                let local_client_index = msg_slice[size_of::<u32>() * 2];
+
+                let msg_slice = &msg.as_ref()[HEADER_LEN..];
                 type ServerToClientResult = Result<(ServerToClientPacket, usize), DecodeError>;
-                let decode_result: ServerToClientResult = bincode::serde::decode_from_slice(msg.as_ref(), config);
+                let decode_result: ServerToClientResult = bincode::serde::decode_from_slice(msg_slice, config);
                 match decode_result {
                     Ok((packet, _)) => {
                         match packet {
                             ServerToClientPacket::WorldState(ws) => {
-                                world_states.states.push(ws);
+                                world_states.states.push_back(ClientWorldState{ world: ws, last_applied_input, local_client_index});
                                 world_states.received_per_sec.push_back(time.elapsed_seconds())
                             },
                             ServerToClientPacket::Pong(pd) => {
@@ -146,7 +180,7 @@ fn connection_handler(
                         }
                     }
                     Err(err) => {
-                        warn!("Error parsing message from {}: {:?} {:?}", handle, msg.as_ref(), err);
+                        warn!("Error parsing message from {}: {:?} {:?}", handle, msg_slice, err);
                     }
                 }
             }
@@ -174,6 +208,101 @@ fn connection_handler(
     }*/
 }
 
+fn apply_velocity(delta_secs: f32, transform: &mut Transform, velocity: &Velocity) {
+    transform.translation.x += velocity.x * delta_secs;
+    transform.translation.y += velocity.y * delta_secs;
+}
+
+fn reconcile_and_update_predictions(
+    mut local_paddles: Query<(&mut Transform, &NetId), (With<LocallyPredicted>, With<Paddle>)>,
+    mut local_balls: Query<(&mut Transform, &mut Velocity, &NetId), (With<LocallyPredicted>, With<Ball>, Without<Paddle>)>,
+    mut unacked_inputs: ResMut<UnAckedPlayerInputs>,
+    world_states: Res<WorldStates>,
+) {
+    if world_states.states.is_empty() {
+        return;
+    }
+
+    let most_recent_state = world_states.states.back().unwrap();
+
+    let most_recent_input = most_recent_state.last_applied_input;
+    let pos = unacked_inputs.inputs.iter().position(|input| input.sequence == most_recent_input);
+    if let Some(pos) = pos {
+        unacked_inputs.inputs.drain(0..=pos);
+    }
+
+    if unacked_inputs.inputs.is_empty() {
+        info!("NO UNACKED, RETURNING");
+        return;
+    }
+
+    // Forward predict balls - NO REFLECTION
+    for (mut transform, mut velocity, &net_id) in local_balls.iter_mut() {
+        // Don't love a double for loop here, or the match
+        for e in &most_recent_state.world.entities {
+            if e.net_id == net_id {
+                apply_velocity(TICK_S as f32, &mut transform, &velocity);
+
+                let prev_transform = transform.clone();
+                match &e.entity_type {
+                    NetEntityType::Ball(d) => {
+                        transform.translation = Vec3::from((d.pos, 0.0));
+
+                        for _ in 0..unacked_inputs.inputs.len() {
+                            apply_velocity(
+                                TICK_S as f32,
+                                &mut transform,
+                                &Velocity(d.velocity)
+                            );
+                            //info!("BALL STEP {} from {}: {:?} to {:?} vel {:?}", i, most_recent_input, p.translation, transform.translation, d.velocity);
+                        }
+
+                        velocity.0 = d.velocity;
+
+                        if prev_transform != *transform {
+                            warn!("BALL MISPREDICT: {:?} corrected to {:?}", prev_transform.translation, transform.translation);
+                        }
+                    },
+                    _ => panic!("Unexpected entity type")
+                }
+
+                break;
+            }
+        }
+    }
+
+    for (mut transform, &net_id) in local_paddles.iter_mut() {
+        // Don't love a double for loop here, or the match
+        for e in &most_recent_state.world.entities {
+            if e.net_id == net_id {
+                // apply latest input
+                move_paddle(TICK_S as f32, &mut transform, unacked_inputs.inputs.back().unwrap());
+
+                let prev_transform = transform.clone();
+
+                match &e.entity_type {
+                    NetEntityType::Paddle(d) => {
+                        transform.translation = Vec3::from((d.pos, 0.0));
+
+                        // Replay inputs
+
+                        for input in &unacked_inputs.inputs {
+                            move_paddle(TICK_S as f32, &mut transform, input);
+                        }
+
+                        if prev_transform != *transform {
+                            warn!("PADDLE MISPREDICT: {:?} corrected to {:?}", prev_transform, transform);
+                        }
+                    },
+                    _ => panic!("Unexpected entity type")
+                }
+
+                break;
+            }
+        }
+    }
+}
+
 fn interpolate_frame(
     mut query: Query<(&mut Transform, &InterpolatedTransform)>,
     time: Res<Time<Fixed>>,
@@ -184,15 +313,19 @@ fn interpolate_frame(
     }
 }
 
-trait SpawnInterpolatedTransformBundleEx {
+trait SpawNetBundleEx {
     // define a method that we will be able to call on `commands`
     fn spawn_interpolated_transform_bundle<B: Bundle>(
+        &mut self, bundle: B
+    ) -> Entity;
+
+    fn spawn_predicted_bundle<B: Bundle>(
         &mut self, bundle: B
     ) -> Entity;
 }
 
 // implement our trait for Bevy's `Commands`
-impl<'w, 's> SpawnInterpolatedTransformBundleEx for Commands<'w, 's> {
+impl<'w, 's> SpawNetBundleEx for Commands<'w, 's> {
     fn spawn_interpolated_transform_bundle<B: Bundle>(
         &mut self, bundle: B
     ) -> Entity {
@@ -200,30 +333,64 @@ impl<'w, 's> SpawnInterpolatedTransformBundleEx for Commands<'w, 's> {
         e.insert(InterpolatedTransform::default());
         e.id()
     }
+
+    fn spawn_predicted_bundle<B: Bundle>(
+        &mut self, bundle: B
+    ) -> Entity {
+        let mut e = self.spawn(bundle);
+        e.insert(LocallyPredicted);
+        e.id()
+    }
+}
+
+enum NetBundleType {
+    Predicted,
+    Interpolated
+}
+
+fn spawn_net_bundle<B: Bundle>(commands: &mut Commands, bundle: B, net_type: NetBundleType) -> Entity {
+    match net_type {
+        NetBundleType::Predicted => {
+            commands.spawn_predicted_bundle(bundle)
+        },
+        NetBundleType::Interpolated => {
+            commands.spawn_interpolated_transform_bundle(bundle)
+        }
+    }
 }
 
 fn sync_net_ids_if_needed_and_update_score(
     commands: &mut Commands,
-    ws: &WorldStateData,
+    ws: &ClientWorldState,
     net_id_query: &Query<(Entity, &NetId)>,
     net_id_map: &mut ResMut<NetIdToEntityId>,
     meshes: &mut Assets<Mesh>,
     score: &mut Score,
     materials: &mut Assets<ColorMaterial>
 ) {
-    let mut ws_net_ids: Vec<NetId> = Vec::with_capacity(ws.entities.len());
-    for net_ent in ws.entities.iter() {
+    let mut ws_net_ids: Vec<NetId> = Vec::with_capacity(ws.world.entities.len());
+
+    let bt = |player_index: NetPlayerIndex| {
+        if player_index.0 == ws.local_client_index { NetBundleType::Predicted } else { NetBundleType::Interpolated }
+    };
+
+    // First, any spawn new entities from this world state
+    for net_ent in ws.world.entities.iter() {
         ws_net_ids.push(net_ent.net_id);
         if !net_id_map.net_id_to_entity_id.contains_key(&net_ent.net_id) {
             let entity_id = match &net_ent.entity_type {
                 NetEntityType::Paddle(d) => {
-                    Some(commands.spawn_interpolated_transform_bundle(PaddleBundle::new(d.pos, net_ent.net_id, d.player_index)))
+                    let bundle = PaddleBundle::new(d.pos, net_ent.net_id, d.player_index);
+                    Some(spawn_net_bundle(commands, bundle, bt(d.player_index)))
                 }
                 NetEntityType::Brick(d) => {
-                    Some(commands.spawn_interpolated_transform_bundle(BrickBundle::new(d.pos, net_ent.net_id)))
+                    let bundle = BrickBundle::new(d.pos, net_ent.net_id);
+                    Some(spawn_net_bundle(commands, bundle, NetBundleType::Interpolated))
                 }
                 NetEntityType::Ball(d) => {
-                    Some(commands.spawn_interpolated_transform_bundle(BallBundle::new(meshes, materials, d.pos, net_ent.net_id, d.player_index)))
+                    let bundle = BallBundle::new(meshes, materials, d.pos, net_ent.net_id, d.player_index);
+                    //Some(spawn_net_bundle(commands, bundle, NetBundleType::Interpolated)) // TODO: predict local balls
+                    Some(spawn_net_bundle(commands, bundle, bt(d.player_index)))
                 }
                 NetEntityType::Score(d) => {
                     // Feels gross to do this here, TODO: find a better spot
@@ -238,6 +405,7 @@ fn sync_net_ids_if_needed_and_update_score(
         }
     }
 
+    // Second, remove entities that don't exist in this world state
     for (entity, net_id) in net_id_query.iter() {
         if !ws_net_ids.contains(net_id) {
             commands.entity(entity).despawn();
@@ -275,9 +443,9 @@ fn setup(
 fn apply_world_state(
     query: &mut Query<&mut InterpolatedTransform>,
     net_id_map: &mut ResMut<NetIdToEntityId>,
-    to_state: &WorldStateData
+    to_state: &ClientWorldState
 ) {
-    for net_ent in to_state.entities.iter() {
+    for net_ent in to_state.world.entities.iter() {
         if let Some(entity) = net_id_map.net_id_to_entity_id.get(&net_ent.net_id) {
             if query.contains(*entity) {
                 let mut interp_transform = query.get_mut(*entity).unwrap();
@@ -292,11 +460,17 @@ fn send_input (
     keyboard_input: Res<ButtonInput<KeyCode>>,
     remote_addr: Res<ResSocketAddr>,
     mut transport: ResMut<Transport>,
-    mut fixed_state: ResMut<FixedTickWorldResource>,
+    world_states: ResMut<WorldStates>,
+    fixed_state: ResMut<FixedTickWorldResource>,
+    mut unacked_inputs: ResMut<UnAckedPlayerInputs>
 ) {
-    fixed_state.frame_counter += 1;
-    debug!("({})", fixed_state.frame_counter);
+    if world_states.interpolating_from.is_none() {
+        return;
+    }
+
     let mut input = PlayerInputData::default();
+    input.sequence = fixed_state.frame_counter;
+    input.simulating_frame = world_states.interpolating_from.unwrap();
 
     if keyboard_input.pressed(KeyCode::ArrowLeft) {
         input.key_mask |= 1 << (NetKey::Left as u8);
@@ -305,6 +479,8 @@ fn send_input (
     if keyboard_input.pressed(KeyCode::ArrowRight) {
         input.key_mask |= 1 << (NetKey::Right as u8);
     }
+
+    unacked_inputs.inputs.push_back(input.clone());
 
     let packet = ClientToServerPacket::Input(input);
     let mut buf = [0; networking::ETHERNET_MTU];
@@ -385,6 +561,7 @@ fn tick_simulation(
     // advance state to interp
     let mut bootstrap_first_state = false;
     if world_states.interp_started {
+        world_states.interpolating_from = Some(world_states.states.front().unwrap().world.frame);
         world_states.states.remove(0);
     } else {
         world_states.interp_started = true;
@@ -423,6 +600,7 @@ fn tick_simulation(
             &mut materials,
             &mut score,
             from_state);
+        world_states.interpolating_from = Some(from_state.world.frame);
 
         let to_state = &world_states.states[1];
         update_map_and_apply_world_state(
@@ -434,6 +612,7 @@ fn tick_simulation(
             &mut materials,
             &mut score,
             to_state);
+        world_states.interpolating_to = Some(to_state.world.frame);
     } else {
         let to_state = &world_states.states[0];
         update_map_and_apply_world_state(
@@ -445,6 +624,7 @@ fn tick_simulation(
             &mut materials,
             &mut score,
             to_state);
+        world_states.interpolating_to = Some(to_state.world.frame);
     }
 
     //info!("{} us", (Instant::now() - now_inst).as_micros());
@@ -457,7 +637,8 @@ fn update_map_and_apply_world_state(
     net_id_map: &mut ResMut<NetIdToEntityId>,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<ColorMaterial>>,
-    score: &mut ResMut<Score>, to_state: &WorldStateData
+    score: &mut ResMut<Score>,
+    to_state: &ClientWorldState
 ) {
     sync_net_ids_if_needed_and_update_score(commands, to_state, net_id_query, net_id_map, meshes, score, materials);
     apply_world_state(query, net_id_map, to_state);

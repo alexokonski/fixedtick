@@ -8,9 +8,7 @@ use rand_chacha::ChaCha8Rng;
 use crate::common::*;
 
 pub const GAP_BETWEEN_PADDLE_AND_FLOOR: f32 = 60.0;
-pub const PADDLE_SPEED: f32 = 500.0;
 // How close can the paddle get to the wall
-pub const PADDLE_PADDING: f32 = 10.0;
 
 // We set the z-value of the ball to 1 (WHEN SPAWNING, NOT HERE) so it renders on top in the case of overlapping sprites.
 pub const BALL_STARTING_POSITION: Vec2 = Vec2::new(0.0, -50.0);
@@ -26,14 +24,14 @@ pub const BACKGROUND_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 pub const LISTEN_ADDRESS: &str = "127.0.0.1:7001";
 pub const BUFFER_DELAY_S: f64 = 1.0 * TICK_S + MIN_JITTER_S;
 pub const BUFFER_LEN: usize = 1 + ((BUFFER_DELAY_S / TICK_S) as usize);
-pub const PADDLE_LEFT_BOUND: f32 = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING;
-pub const PADDLE_RIGHT_BOUND: f32 = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING;
 
 #[derive(Component)]
 pub struct NetConnection {
     pub addr: SocketAddr,
     pub paddle_entity: Entity,
-    pub ball_entity: Entity
+    pub ball_entity: Entity,
+    pub last_applied_input: u32,
+    pub player_index: u8
 }
 
 #[derive(Default)]
