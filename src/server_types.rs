@@ -22,7 +22,7 @@ pub const BACKGROUND_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 
 
 pub const LISTEN_ADDRESS: &str = "127.0.0.1:7001";
-pub const BUFFER_DELAY_S: f64 = 1.0 * TICK_S + MIN_JITTER_S;
+pub const BUFFER_DELAY_S: f64 = 5.0 * TICK_S + MIN_JITTER_S;
 pub const BUFFER_LEN: usize = 1 + ((BUFFER_DELAY_S / TICK_S) as usize);
 
 #[derive(Component)]

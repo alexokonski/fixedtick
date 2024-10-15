@@ -52,7 +52,7 @@ fn main() {
         .insert_resource(generator)
         .insert_resource(NetConnections::default())
         .insert_resource(FixedTickWorldResource::default())
-        .add_event::<CollisionEvent>()
+        //.add_event::<CollisionEvent>()
         .add_systems(Startup, setup)
         .add_systems(
             FixedUpdate,
@@ -63,7 +63,7 @@ fn main() {
                 connection_handler,
                 process_input,
                 apply_velocity,
-                check_for_collisions,
+                collision_system,
                 update_scoreboard,
                 broadcast_world_state,
                 networking::systems::send_packet_system.in_set(NetworkSystem::Send),
@@ -340,6 +340,35 @@ fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time<
     for (mut transform, velocity) in &mut query {
         transform.translation.x += velocity.x * time.delta_seconds();
         transform.translation.y += velocity.y * time.delta_seconds();
+    }
+}
+
+fn collision_system(
+    mut commands: Commands,
+    mut score: ResMut<Score>,
+    mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
+    collider_query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
+) {
+    // This is gross and bad. Make a copy of all the colliders to avoid borrow checker issues
+    // probably should just break out the bricks here :-/
+    let colliders: Vec<(Entity, Transform, Option<Brick>)> = collider_query
+        .iter()
+        .map(|(e, t, b)| {
+            if b.is_some() {
+                (e, t.clone(), Some(*(b.unwrap())))
+            } else {
+                (e, t.clone(), None)
+            }
+        })
+        .collect::<Vec<(Entity, Transform, Option<Brick>)>>();
+
+    let mut entities_to_delete = Vec::new();
+    for (mut ball_velocity, ball_transform) in ball_query.iter_mut() {
+        check_single_ball_collision(&mut score, &colliders, ball_transform, &mut ball_velocity, &mut entities_to_delete);
+    }
+
+    for entity in entities_to_delete {
+        commands.entity(entity).despawn();
     }
 }
 

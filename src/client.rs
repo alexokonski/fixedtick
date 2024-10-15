@@ -213,10 +213,26 @@ fn apply_velocity(delta_secs: f32, transform: &mut Transform, velocity: &Velocit
     transform.translation.y += velocity.y * delta_secs;
 }
 
+fn simulate_ball(
+    delta_secs: f32,
+    transform: &mut Transform,
+    velocity: &mut Velocity,
+    score: &mut ResMut<Score>,
+    colliders: &Vec<(Entity, Transform, Option<Brick>)>,
+    entities_to_delete: &mut Vec<Entity>,
+) {
+    apply_velocity(delta_secs, transform, velocity);
+    check_single_ball_collision(score, colliders, transform, velocity, entities_to_delete);
+}
+
 fn reconcile_and_update_predictions(
-    mut local_paddles: Query<(&mut Transform, &NetId), (With<LocallyPredicted>, With<Paddle>)>,
-    mut local_balls: Query<(&mut Transform, &mut Velocity, &NetId), (With<LocallyPredicted>, With<Ball>, Without<Paddle>)>,
+    mut set: ParamSet<(
+        Query<(&mut Transform, &mut Velocity, &NetId), (With<LocallyPredicted>, With<Ball>, Without<Paddle>)>,
+        Query<(&mut Transform, &NetId), (With<LocallyPredicted>, With<Paddle>)>,
+        Query<(Entity, &Transform, Option<&Brick>), With<Collider>>
+    )>,
     mut unacked_inputs: ResMut<UnAckedPlayerInputs>,
+    mut score: ResMut<Score>,
     world_states: Res<WorldStates>,
 ) {
     if world_states.states.is_empty() {
@@ -236,28 +252,48 @@ fn reconcile_and_update_predictions(
         return;
     }
 
-    // Forward predict balls - NO REFLECTION
-    for (mut transform, mut velocity, &net_id) in local_balls.iter_mut() {
+    // This is gross and bad. Make a copy of all the colliders to avoid borrow checker issues
+    // probably should just break out the bricks here :-/
+    let colliders: Vec<(Entity, Transform, Option<Brick>)> = set
+        .p2()
+        .iter()
+        .map(|(e, t, b)| {
+            if b.is_some() {
+                (e, t.clone(), Some(*(b.unwrap())))
+            } else {
+                (e, t.clone(), None)
+            }
+        })
+        .collect::<Vec<(Entity, Transform, Option<Brick>)>>();
+
+    // Forward predict balls
+    for (mut transform, mut velocity, &net_id) in set.p0().iter_mut() {
         // Don't love a double for loop here, or the match
         for e in &most_recent_state.world.entities {
             if e.net_id == net_id {
-                apply_velocity(TICK_S as f32, &mut transform, &velocity);
+                //apply_velocity(TICK_S as f32, &mut transform, &velocity);
+                simulate_ball(TICK_S as f32, &mut transform, &mut velocity, &mut score, &colliders, &mut Vec::new());
 
                 let prev_transform = transform.clone();
                 match &e.entity_type {
                     NetEntityType::Ball(d) => {
                         transform.translation = Vec3::from((d.pos, 0.0));
 
+                        let mut ignore_entities = Vec::new();
+                        let mut replay_velocity = Velocity(d.velocity);
                         for _ in 0..unacked_inputs.inputs.len() {
-                            apply_velocity(
+                            /*apply_velocity(
                                 TICK_S as f32,
                                 &mut transform,
                                 &Velocity(d.velocity)
-                            );
+                            );*/
+
+                            simulate_ball(TICK_S as f32, &mut transform, &mut replay_velocity, &mut score, &colliders, &mut ignore_entities);
+
                             //info!("BALL STEP {} from {}: {:?} to {:?} vel {:?}", i, most_recent_input, p.translation, transform.translation, d.velocity);
                         }
 
-                        velocity.0 = d.velocity;
+                        *velocity = replay_velocity;
 
                         if prev_transform != *transform {
                             warn!("BALL MISPREDICT: {:?} corrected to {:?}", prev_transform.translation, transform.translation);
@@ -271,7 +307,7 @@ fn reconcile_and_update_predictions(
         }
     }
 
-    for (mut transform, &net_id) in local_paddles.iter_mut() {
+    for (mut transform, &net_id) in set.p1().iter_mut() {
         // Don't love a double for loop here, or the match
         for e in &most_recent_state.world.entities {
             if e.net_id == net_id {

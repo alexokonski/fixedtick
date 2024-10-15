@@ -1,5 +1,3 @@
-//#![allow(dead_code)]
-
 use std::time;
 use bevy::{
     math::bounding::{Aabb2d, BoundingCircle, BoundingVolume, IntersectsVolume},
@@ -70,7 +68,7 @@ pub struct Collider;
 #[derive(Event, Default)]
 pub struct CollisionEvent;
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub struct Brick;
 
 // This bundle is a collection of the components that define a "wall" in our game
@@ -271,59 +269,61 @@ pub struct FixedTickWorldResource {
     //pub net_ids_removed_this_frame: Vec<NetId>
 }
 
-pub fn check_for_collisions(
-    mut commands: Commands,
-    mut score: ResMut<Score>,
-    mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
-    collider_query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
-    mut collision_events: EventWriter<CollisionEvent>,
+pub fn check_single_ball_collision(
+    score: &mut ResMut<Score>,
+    colliders: &Vec<(Entity, Transform, Option<Brick>)>,
+    ball_transform: &Transform,
+    ball_velocity: &mut Velocity,
+    entities_to_delete: &mut Vec<Entity>,
 ) {
-    for (mut ball_velocity, ball_transform) in ball_query.iter_mut() {
-        for (collider_entity, collider_transform, maybe_brick) in &collider_query {
-            let collision = ball_collision(
-                BoundingCircle::new(ball_transform.translation.truncate(), BALL_DIAMETER / 2.),
-                Aabb2d::new(
-                    collider_transform.translation.truncate(),
-                    collider_transform.scale.truncate() / 2.,
-                ),
-            );
+    for (collider_entity, collider_transform, maybe_brick) in colliders {
+        if entities_to_delete.contains(&collider_entity) {
+            continue;
+        }
+        let collision = ball_collision(
+            BoundingCircle::new(ball_transform.translation.truncate(), BALL_DIAMETER / 2.),
+            Aabb2d::new(
+                collider_transform.translation.truncate(),
+                collider_transform.scale.truncate() / 2.,
+            ),
+        );
 
-            if let Some(collision) = collision {
-                // Sends a collision event so that other systems can react to the collision
-                collision_events.send_default();
+        if let Some(collision) = collision {
+            // Sends a collision event so that other systems can react to the collision
+            //collision_events.send_default();
 
-                // Bricks should be despawned and increment the scoreboard on collision
-                if maybe_brick.is_some() {
-                    commands.entity(collider_entity).despawn();
-                    score.0 += 1;
-                }
+            // Bricks should be despawned and increment the scoreboard on collision
+            if maybe_brick.is_some() {
+                entities_to_delete.push(*collider_entity);
+                score.0 += 1;
+            }
 
-                // Reflect the ball's velocity when it collides
-                let mut reflect_x = false;
-                let mut reflect_y = false;
+            // Reflect the ball's velocity when it collides
+            let mut reflect_x = false;
+            let mut reflect_y = false;
 
-                // Reflect only if the velocity is in the opposite direction of the collision
-                // This prevents the ball from getting stuck inside the bar
-                match collision {
-                    Collision::Left => reflect_x = ball_velocity.x > 0.0,
-                    Collision::Right => reflect_x = ball_velocity.x < 0.0,
-                    Collision::Top => reflect_y = ball_velocity.y < 0.0,
-                    Collision::Bottom => reflect_y = ball_velocity.y > 0.0,
-                }
+            // Reflect only if the velocity is in the opposite direction of the collision
+            // This prevents the ball from getting stuck inside the bar
+            match collision {
+                Collision::Left => reflect_x = ball_velocity.x > 0.0,
+                Collision::Right => reflect_x = ball_velocity.x < 0.0,
+                Collision::Top => reflect_y = ball_velocity.y < 0.0,
+                Collision::Bottom => reflect_y = ball_velocity.y > 0.0,
+            }
 
-                // Reflect velocity on the x-axis if we hit something on the x-axis
-                if reflect_x {
-                    ball_velocity.x = -ball_velocity.x;
-                }
+            // Reflect velocity on the x-axis if we hit something on the x-axis
+            if reflect_x {
+                ball_velocity.x = -ball_velocity.x;
+            }
 
-                // Reflect velocity on the y-axis if we hit something on the y-axis
-                if reflect_y {
-                    ball_velocity.y = -ball_velocity.y;
-                }
+            // Reflect velocity on the y-axis if we hit something on the y-axis
+            if reflect_y {
+                ball_velocity.y = -ball_velocity.y;
             }
         }
     }
 }
+
 
 pub const PADDLE_SPEED: f32 = 500.0;
 pub const PADDLE_PADDING: f32 = 10.0;
