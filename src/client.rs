@@ -139,6 +139,7 @@ fn connection_handler(
     mut events: EventReader<NetworkEvent>,
     mut world_states: ResMut<WorldStates>,
     mut ping_state: ResMut<PingState>,
+    mut unacked_inputs: ResMut<UnAckedPlayerInputs>,
     time: Res<Time<Real>>,
 ) {
     //let mut recv_count = 0;
@@ -172,6 +173,14 @@ fn connection_handler(
                         match packet {
                             ServerToClientPacket::WorldState(ws) => {
                                 world_states.states.push_back(ClientWorldState{ world: ws, last_applied_input, local_client_index});
+
+                                // Clear previous inputs
+                                let most_recent_input = world_states.states.back().unwrap().last_applied_input;
+                                let pos = unacked_inputs.inputs.iter().position(|input| input.sequence == most_recent_input);
+                                if let Some(pos) = pos {
+                                    unacked_inputs.inputs.drain(0..=pos);
+                                }
+
                                 world_states.received_per_sec.push_back(time.elapsed_seconds())
                             },
                             ServerToClientPacket::Pong(pd) => {
@@ -213,25 +222,25 @@ fn apply_velocity(delta_secs: f32, transform: &mut Transform, velocity: &Velocit
     transform.translation.y += velocity.y * delta_secs;
 }
 
-fn simulate_ball(
+/*fn simulate_ball(
     delta_secs: f32,
-    transform: &mut Transform,
+    transform: &Transform,
     velocity: &mut Velocity,
     score: &mut ResMut<Score>,
     colliders: &Vec<(Entity, Transform, Option<Brick>)>,
     entities_to_delete: &mut Vec<Entity>,
 ) {
-    apply_velocity(delta_secs, transform, velocity);
     check_single_ball_collision(score, colliders, transform, velocity, entities_to_delete);
-}
+}*/
 
 fn reconcile_and_update_predictions(
     mut set: ParamSet<(
         Query<(&mut Transform, &mut Velocity, &NetId), (With<LocallyPredicted>, With<Ball>, Without<Paddle>)>,
         Query<(&mut Transform, &NetId), (With<LocallyPredicted>, With<Paddle>)>,
-        Query<(Entity, &Transform, Option<&Brick>), With<Collider>>
+        Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
     )>,
-    mut unacked_inputs: ResMut<UnAckedPlayerInputs>,
+    //collider_query: Query<(Entity, &Transform, Option<&Brick>), (With<Collider>, Without<Paddle>)>,
+    unacked_inputs: ResMut<UnAckedPlayerInputs>,
     mut score: ResMut<Score>,
     world_states: Res<WorldStates>,
 ) {
@@ -241,100 +250,92 @@ fn reconcile_and_update_predictions(
 
     let most_recent_state = world_states.states.back().unwrap();
 
-    let most_recent_input = most_recent_state.last_applied_input;
-    let pos = unacked_inputs.inputs.iter().position(|input| input.sequence == most_recent_input);
-    if let Some(pos) = pos {
-        unacked_inputs.inputs.drain(0..=pos);
-    }
-
     if unacked_inputs.inputs.is_empty() {
         info!("NO UNACKED, RETURNING");
         return;
     }
 
-    // This is gross and bad. Make a copy of all the colliders to avoid borrow checker issues
-    // probably should just break out the bricks here :-/
-    let colliders: Vec<(Entity, Transform, Option<Brick>)> = set
-        .p2()
-        .iter()
-        .map(|(e, t, b)| {
-            if b.is_some() {
-                (e, t.clone(), Some(*(b.unwrap())))
-            } else {
-                (e, t.clone(), None)
-            }
-        })
-        .collect::<Vec<(Entity, Transform, Option<Brick>)>>();
+    let mut entities_to_ignore = Vec::new();
+    for i in 0..unacked_inputs.inputs.len() {
+        // Forward predict paddles
+        for (mut transform, &net_id) in set.p1().iter_mut() {
+            // Don't love a double for loop here, or the match
+            for e in &most_recent_state.world.entities {
+                if e.net_id == net_id {
+                    // apply latest input
+                    //move_paddle(TICK_S as f32, &mut transform, unacked_inputs.inputs.back().unwrap());
 
-    // Forward predict balls
-    for (mut transform, mut velocity, &net_id) in set.p0().iter_mut() {
-        // Don't love a double for loop here, or the match
-        for e in &most_recent_state.world.entities {
-            if e.net_id == net_id {
-                //apply_velocity(TICK_S as f32, &mut transform, &velocity);
-                simulate_ball(TICK_S as f32, &mut transform, &mut velocity, &mut score, &colliders, &mut Vec::new());
+                    match &e.entity_type {
+                        NetEntityType::Paddle(d) => {
+                            if i == 0 {
+                                transform.translation = Vec3::from((d.pos, 0.0));
+                            }
 
-                let prev_transform = transform.clone();
-                match &e.entity_type {
-                    NetEntityType::Ball(d) => {
-                        transform.translation = Vec3::from((d.pos, 0.0));
+                            move_paddle(TICK_S as f32, &mut transform, &unacked_inputs.inputs[i]);
 
-                        let mut ignore_entities = Vec::new();
-                        let mut replay_velocity = Velocity(d.velocity);
-                        for _ in 0..unacked_inputs.inputs.len() {
-                            /*apply_velocity(
-                                TICK_S as f32,
-                                &mut transform,
-                                &Velocity(d.velocity)
-                            );*/
+                            //if prev_transform != *transform {
+                            //    warn!("PADDLE MISPREDICT: {:?} corrected to {:?}", prev_transform, transform);
+                            //}
+                        },
+                        _ => panic!("Unexpected entity type")
+                    }
 
-                            simulate_ball(TICK_S as f32, &mut transform, &mut replay_velocity, &mut score, &colliders, &mut ignore_entities);
-
-                            //info!("BALL STEP {} from {}: {:?} to {:?} vel {:?}", i, most_recent_input, p.translation, transform.translation, d.velocity);
-                        }
-
-                        *velocity = replay_velocity;
-
-                        if prev_transform != *transform {
-                            warn!("BALL MISPREDICT: {:?} corrected to {:?}", prev_transform.translation, transform.translation);
-                        }
-                    },
-                    _ => panic!("Unexpected entity type")
+                    break;
                 }
-
-                break;
             }
         }
-    }
 
-    for (mut transform, &net_id) in set.p1().iter_mut() {
-        // Don't love a double for loop here, or the match
-        for e in &most_recent_state.world.entities {
-            if e.net_id == net_id {
-                // apply latest input
-                move_paddle(TICK_S as f32, &mut transform, unacked_inputs.inputs.back().unwrap());
+        // Forward predict balls
+        for (mut transform, mut velocity, &net_id) in set.p0().iter_mut() {
+            for e in &most_recent_state.world.entities {
+                if e.net_id == net_id {
+                    match &e.entity_type {
+                        NetEntityType::Ball(d) => {
 
-                let prev_transform = transform.clone();
+                            if i == 0 {
+                                transform.translation = Vec3::from((d.pos, 0.0));
+                                *velocity = Velocity(d.velocity);
+                                //apply_velocity(TICK_S as f32, &mut transform, &velocity);
+                            }
 
-                match &e.entity_type {
-                    NetEntityType::Paddle(d) => {
-                        transform.translation = Vec3::from((d.pos, 0.0));
+                            apply_velocity(
+                                TICK_S as f32,
+                                &mut transform,
+                                &velocity
+                            );
 
-                        // Replay inputs
+                            //*velocity = Velocity(d.velocity);
 
-                        for input in &unacked_inputs.inputs {
-                            move_paddle(TICK_S as f32, &mut transform, input);
-                        }
+                            /*if prev_transform != *transform {
+                                warn!("BALL MISPREDICT: {:?} corrected to {:?}", prev_transform.translation, transform.translation);
+                            }*/
+                        },
+                        _ => panic!("Unexpected entity type")
+                    }
 
-                        if prev_transform != *transform {
-                            warn!("PADDLE MISPREDICT: {:?} corrected to {:?}", prev_transform, transform);
-                        }
-                    },
-                    _ => panic!("Unexpected entity type")
+                    break;
                 }
-
-                break;
             }
+        }
+
+        // This is gross. Make a copy of all the colliders to avoid borrow checker issues
+        // Not sure how to do this properly without splitting this operation into 2 systems
+        // for basically no reason?
+        let colliders: Vec<(Entity, Transform, Option<Brick>)> = set
+            .p2()
+            .iter()
+            .map(|(e, t, b)| {
+                if b.is_some() {
+                    (e, t.clone(), Some(*(b.unwrap())))
+                } else {
+                    (e, t.clone(), None)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // Perform collision detection
+        for (transform, mut velocity, _) in set.p0().iter_mut() {
+            check_single_ball_collision(&mut score, &colliders, &transform, &mut velocity, &mut entities_to_ignore);
         }
     }
 }
@@ -426,7 +427,7 @@ fn sync_net_ids_if_needed_and_update_score(
                 NetEntityType::Ball(d) => {
                     let bundle = BallBundle::new(meshes, materials, d.pos, net_ent.net_id, d.player_index);
                     //Some(spawn_net_bundle(commands, bundle, NetBundleType::Interpolated)) // TODO: predict local balls
-                    Some(spawn_net_bundle(commands, bundle, bt(d.player_index)))
+                    Some(spawn_net_bundle(commands, bundle, NetBundleType::Predicted))
                 }
                 NetEntityType::Score(d) => {
                     // Feels gross to do this here, TODO: find a better spot
@@ -604,7 +605,7 @@ fn tick_simulation(
         bootstrap_first_state = true;
     }
 
-    let expected_buffer = 1 + f64::round(INTERP_DELAY_S / TICK_S) as usize;
+    let expected_buffer = 2 + f64::round(INTERP_DELAY_S / TICK_S) as usize;
 
     if world_states.received_per_sec.len() > 0 &&
         now - world_states.received_per_sec.front().unwrap() < INTERP_DELAY_S as f32 {
@@ -617,8 +618,6 @@ fn tick_simulation(
     }
 
     //warn!("BUF {}!", world_states.states.len());
-
-
 
     if (bootstrap_first_state && world_states.states.len() < 2) ||
         world_states.states.is_empty() {

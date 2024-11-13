@@ -6,6 +6,7 @@ mod common;
 use common::*;
 use std::time;
 use std::net::SocketAddr;
+use bevy::math::bounding::{Aabb2d};
 use bevy::prelude::*;
 use bincode;
 use bincode::config;
@@ -52,7 +53,6 @@ fn main() {
         .insert_resource(generator)
         .insert_resource(NetConnections::default())
         .insert_resource(FixedTickWorldResource::default())
-        //.add_event::<CollisionEvent>()
         .add_systems(Startup, setup)
         .add_systems(
             FixedUpdate,
@@ -63,7 +63,7 @@ fn main() {
                 connection_handler,
                 process_input,
                 apply_velocity,
-                collision_system,
+                check_for_collisions,
                 update_scoreboard,
                 broadcast_world_state,
                 networking::systems::send_packet_system.in_set(NetworkSystem::Send),
@@ -77,6 +77,17 @@ fn setup(
     mut commands: Commands,
     mut net_id_gen: ResMut<NetIdGenerator>
 ) {
+
+    //let circ = BoundingCircle::new(Vec2::new(0.0, 0.0), BALL_DIAMETER / 2.);
+    let aabb = Aabb2d::new(
+        Vec2::new(0.0, 0.0),
+        Vec2::new(4.0, 6.0),
+    );
+
+    let p = aabb.closest_point(Vec2::new(7.0, 3.0));
+
+    info!("{:?}", p);
+
     // Camera
     commands.spawn(Camera2dBundle::default());
 
@@ -343,14 +354,12 @@ fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time<
     }
 }
 
-fn collision_system(
+pub fn check_for_collisions(
     mut commands: Commands,
     mut score: ResMut<Score>,
     mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
-    collider_query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
+    collider_query: Query<(Entity, &Transform, Option<&Brick>), (With<Collider>, Without<Ball>)>,
 ) {
-    // This is gross and bad. Make a copy of all the colliders to avoid borrow checker issues
-    // probably should just break out the bricks here :-/
     let colliders: Vec<(Entity, Transform, Option<Brick>)> = collider_query
         .iter()
         .map(|(e, t, b)| {
@@ -360,15 +369,15 @@ fn collision_system(
                 (e, t.clone(), None)
             }
         })
-        .collect::<Vec<(Entity, Transform, Option<Brick>)>>();
+        .collect::<Vec<_>>();
 
     let mut entities_to_delete = Vec::new();
     for (mut ball_velocity, ball_transform) in ball_query.iter_mut() {
-        check_single_ball_collision(&mut score, &colliders, ball_transform, &mut ball_velocity, &mut entities_to_delete);
+        check_single_ball_collision(&mut score, &colliders, &ball_transform, &mut ball_velocity, &mut entities_to_delete);
     }
 
-    for entity in entities_to_delete {
-        commands.entity(entity).despawn();
+    for e in entities_to_delete {
+        commands.entity(e).despawn();
     }
 }
 
