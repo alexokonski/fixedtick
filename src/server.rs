@@ -358,18 +358,9 @@ pub fn check_for_collisions(
     mut commands: Commands,
     mut score: ResMut<Score>,
     mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
-    collider_query: Query<(Entity, &Transform, Option<&Brick>), (With<Collider>, Without<Ball>)>,
+    collider_query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
 ) {
-    let colliders: Vec<(Entity, Transform, Option<Brick>)> = collider_query
-        .iter()
-        .map(|(e, t, b)| {
-            if b.is_some() {
-                (e, t.clone(), Some(*(b.unwrap())))
-            } else {
-                (e, t.clone(), None)
-            }
-        })
-        .collect::<Vec<_>>();
+    let colliders: Vec<(Entity, Transform, Option<Brick>)> = collect_colliders(collider_query);
 
     let mut entities_to_delete = Vec::new();
     for (mut ball_velocity, ball_transform) in ball_query.iter_mut() {

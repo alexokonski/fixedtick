@@ -20,8 +20,33 @@ const INTERP_DELAY_S: f64 = TICK_S + MIN_JITTER_S;
 
 struct ClientWorldState {
     world: NetWorldStateData,
+    net_id_to_entity: HashMap<NetId, usize>,
     last_applied_input: u32,
     local_client_index: u8
+}
+
+impl ClientWorldState {
+    fn new(world: NetWorldStateData, last_applied_input: u32, local_client_index: u8) -> Self {
+        let mut net_id_to_entity = HashMap::with_capacity(world.entities.len());
+        for (i, net_entity) in world.entities.iter().enumerate() {
+            net_id_to_entity.insert(net_entity.net_id, i);
+        }
+
+        ClientWorldState {
+            world,
+            net_id_to_entity,
+            last_applied_input,
+            local_client_index
+        }
+    }
+
+    fn get_by_net_id(&self, net_id: &NetId) -> Option<&NetEntity> {
+        if let Some(index) = self.net_id_to_entity.get(net_id) {
+            Some(&self.world.entities[*index])
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -172,7 +197,7 @@ fn connection_handler(
                     Ok((packet, _)) => {
                         match packet {
                             ServerToClientPacket::WorldState(ws) => {
-                                world_states.states.push_back(ClientWorldState{ world: ws, last_applied_input, local_client_index});
+                                world_states.states.push_back(ClientWorldState::new(ws, last_applied_input, local_client_index));
 
                                 // Clear previous inputs
                                 let most_recent_input = world_states.states.back().unwrap().last_applied_input;
@@ -239,7 +264,6 @@ fn reconcile_and_update_predictions(
         Query<(&mut Transform, &NetId), (With<LocallyPredicted>, With<Paddle>)>,
         Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
     )>,
-    //collider_query: Query<(Entity, &Transform, Option<&Brick>), (With<Collider>, Without<Paddle>)>,
     unacked_inputs: ResMut<UnAckedPlayerInputs>,
     mut score: ResMut<Score>,
     world_states: Res<WorldStates>,
@@ -258,80 +282,47 @@ fn reconcile_and_update_predictions(
     let mut entities_to_ignore = Vec::new();
     for i in 0..unacked_inputs.inputs.len() {
         // Forward predict paddles
-        for (mut transform, &net_id) in set.p1().iter_mut() {
-            // Don't love a double for loop here, or the match
-            for e in &most_recent_state.world.entities {
-                if e.net_id == net_id {
-                    // apply latest input
-                    //move_paddle(TICK_S as f32, &mut transform, unacked_inputs.inputs.back().unwrap());
-
+        for (mut transform, net_id) in set.p1().iter_mut() {
+            if i == 0 {
+                // rollback to most recent world state
+                if let Some(e) = most_recent_state.get_by_net_id(net_id) {
                     match &e.entity_type {
                         NetEntityType::Paddle(d) => {
-                            if i == 0 {
-                                transform.translation = Vec3::from((d.pos, 0.0));
-                            }
-
-                            move_paddle(TICK_S as f32, &mut transform, &unacked_inputs.inputs[i]);
-
-                            //if prev_transform != *transform {
-                            //    warn!("PADDLE MISPREDICT: {:?} corrected to {:?}", prev_transform, transform);
-                            //}
+                            transform.translation = Vec3::from((d.pos, 0.0));
                         },
                         _ => panic!("Unexpected entity type")
                     }
-
-                    break;
                 }
             }
+
+            move_paddle(TICK_S as f32, &mut transform, &unacked_inputs.inputs[i]);
         }
 
         // Forward predict balls
-        for (mut transform, mut velocity, &net_id) in set.p0().iter_mut() {
-            for e in &most_recent_state.world.entities {
-                if e.net_id == net_id {
+        for (mut transform, mut velocity, net_id) in set.p0().iter_mut() {
+            if i == 0 {
+                // rollback to most recent world state
+                if let Some(e) = most_recent_state.get_by_net_id(net_id) {
                     match &e.entity_type {
                         NetEntityType::Ball(d) => {
-
-                            if i == 0 {
-                                transform.translation = Vec3::from((d.pos, 0.0));
-                                *velocity = Velocity(d.velocity);
-                                //apply_velocity(TICK_S as f32, &mut transform, &velocity);
-                            }
-
-                            apply_velocity(
-                                TICK_S as f32,
-                                &mut transform,
-                                &velocity
-                            );
-
-                            //*velocity = Velocity(d.velocity);
-
-                            /*if prev_transform != *transform {
-                                warn!("BALL MISPREDICT: {:?} corrected to {:?}", prev_transform.translation, transform.translation);
-                            }*/
+                            transform.translation = Vec3::from((d.pos, 0.0));
+                            *velocity = Velocity(d.velocity);
                         },
                         _ => panic!("Unexpected entity type")
                     }
-
-                    break;
                 }
             }
+            apply_velocity(
+                TICK_S as f32,
+                &mut transform,
+                &velocity
+            );
         }
 
         // This is gross. Make a copy of all the colliders to avoid borrow checker issues
         // Not sure how to do this properly without splitting this operation into 2 systems
         // for basically no reason?
-        let colliders: Vec<(Entity, Transform, Option<Brick>)> = set
-            .p2()
-            .iter()
-            .map(|(e, t, b)| {
-                if b.is_some() {
-                    (e, t.clone(), Some(*(b.unwrap())))
-                } else {
-                    (e, t.clone(), None)
-                }
-            })
-            .collect::<Vec<_>>();
+        let colliders: Vec<(Entity, Transform, Option<Brick>)> = collect_colliders(set.p2());
 
         // Perform collision detection
         for (transform, mut velocity, _) in set.p0().iter_mut() {

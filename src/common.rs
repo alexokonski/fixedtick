@@ -538,3 +538,15 @@ impl From<SimLatencyArgs> for networking::SimLatencySettings {
         }
     }
 }
+
+pub fn collect_colliders(query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>) -> Vec<(Entity, Transform, Option<Brick>)> {
+    query.iter()
+        .map(|(e, t, b)| {
+            if b.is_some() {
+                (e, t.clone(), Some(*(b.unwrap())))
+            } else {
+                (e, t.clone(), None)
+            }
+        })
+        .collect::<Vec<_>>()
+}
