@@ -6,7 +6,6 @@ mod common;
 use common::*;
 use std::time;
 use std::net::SocketAddr;
-use bevy::math::bounding::{Aabb2d};
 use bevy::prelude::*;
 use bincode;
 use bincode::config;
@@ -77,17 +76,6 @@ fn setup(
     mut commands: Commands,
     mut net_id_gen: ResMut<NetIdGenerator>
 ) {
-
-    //let circ = BoundingCircle::new(Vec2::new(0.0, 0.0), BALL_DIAMETER / 2.);
-    let aabb = Aabb2d::new(
-        Vec2::new(0.0, 0.0),
-        Vec2::new(4.0, 6.0),
-    );
-
-    let p = aabb.closest_point(Vec2::new(7.0, 3.0));
-
-    info!("{:?}", p);
-
     // Camera
     commands.spawn(Camera2dBundle::default());
 
@@ -360,11 +348,9 @@ pub fn check_for_collisions(
     mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
     collider_query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
 ) {
-    let colliders: Vec<(Entity, Transform, Option<Brick>)> = collect_colliders(collider_query);
-
     let mut entities_to_delete = Vec::new();
     for (mut ball_velocity, ball_transform) in ball_query.iter_mut() {
-        check_single_ball_collision(&mut score, &colliders, &ball_transform, &mut ball_velocity, &mut entities_to_delete);
+        check_single_ball_collision(&mut score, collider_query.iter(), &ball_transform, &mut ball_velocity, &mut entities_to_delete);
     }
 
     for e in entities_to_delete {

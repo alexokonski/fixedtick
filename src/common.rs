@@ -266,12 +266,11 @@ fn ball_collision(ball: BoundingCircle, bounding_box: Aabb2d) -> Option<Collisio
 pub struct FixedTickWorldResource {
     pub frame_counter: u32,
     pub tick_start: Option<time::Instant>
-    //pub net_ids_removed_this_frame: Vec<NetId>
 }
 
-pub fn check_single_ball_collision(
+pub fn check_single_ball_collision<'a>(
     score: &mut ResMut<Score>,
-    colliders: &Vec<(Entity, Transform, Option<Brick>)>,
+    colliders: impl Iterator<Item = (Entity, &'a Transform, Option<&'a Brick>)>,
     ball_transform: &Transform,
     ball_velocity: &mut Velocity,
     entities_to_delete: &mut Vec<Entity>,
@@ -294,7 +293,7 @@ pub fn check_single_ball_collision(
 
             // Bricks should be despawned and increment the scoreboard on collision
             if maybe_brick.is_some() {
-                entities_to_delete.push(*collider_entity);
+                entities_to_delete.push(collider_entity);
                 score.0 += 1;
             }
 
@@ -537,16 +536,4 @@ impl From<SimLatencyArgs> for networking::SimLatencySettings {
             }
         }
     }
-}
-
-pub fn collect_colliders(query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>) -> Vec<(Entity, Transform, Option<Brick>)> {
-    query.iter()
-        .map(|(e, t, b)| {
-            if b.is_some() {
-                (e, t.clone(), Some(*(b.unwrap())))
-            } else {
-                (e, t.clone(), None)
-            }
-        })
-        .collect::<Vec<_>>()
 }

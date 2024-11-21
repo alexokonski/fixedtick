@@ -201,10 +201,7 @@ fn connection_handler(
 
                                 // Clear previous inputs
                                 let most_recent_input = world_states.states.back().unwrap().last_applied_input;
-                                let pos = unacked_inputs.inputs.iter().position(|input| input.sequence == most_recent_input);
-                                if let Some(pos) = pos {
-                                    unacked_inputs.inputs.drain(0..=pos);
-                                }
+                                unacked_inputs.inputs.retain(|input| input.sequence > most_recent_input);
 
                                 world_states.received_per_sec.push_back(time.elapsed_seconds())
                             },
@@ -247,23 +244,10 @@ fn apply_velocity(delta_secs: f32, transform: &mut Transform, velocity: &Velocit
     transform.translation.y += velocity.y * delta_secs;
 }
 
-/*fn simulate_ball(
-    delta_secs: f32,
-    transform: &Transform,
-    velocity: &mut Velocity,
-    score: &mut ResMut<Score>,
-    colliders: &Vec<(Entity, Transform, Option<Brick>)>,
-    entities_to_delete: &mut Vec<Entity>,
-) {
-    check_single_ball_collision(score, colliders, transform, velocity, entities_to_delete);
-}*/
-
 fn reconcile_and_update_predictions(
-    mut set: ParamSet<(
-        Query<(&mut Transform, &mut Velocity, &NetId), (With<LocallyPredicted>, With<Ball>, Without<Paddle>)>,
-        Query<(&mut Transform, &NetId), (With<LocallyPredicted>, With<Paddle>)>,
-        Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
-    )>,
+    mut ball_query: Query<(&mut Transform, &mut Velocity, &NetId), (With<LocallyPredicted>, With<Ball>, Without<Paddle>, Without<Brick>)>,
+    mut paddle_query: Query<(Entity, &mut Transform, &NetId), (With<LocallyPredicted>, With<Paddle>, With<Collider>, Without<Brick>, Without<Ball>)>,
+    remaining_colliders: Query<(Entity, &Transform, Option<&Brick>), (With<Collider>, Without<Ball>, Without<Paddle>)>,
     unacked_inputs: ResMut<UnAckedPlayerInputs>,
     mut score: ResMut<Score>,
     world_states: Res<WorldStates>,
@@ -282,7 +266,7 @@ fn reconcile_and_update_predictions(
     let mut entities_to_ignore = Vec::new();
     for i in 0..unacked_inputs.inputs.len() {
         // Forward predict paddles
-        for (mut transform, net_id) in set.p1().iter_mut() {
+        for (_, mut transform, net_id) in paddle_query.iter_mut() {
             if i == 0 {
                 // rollback to most recent world state
                 if let Some(e) = most_recent_state.get_by_net_id(net_id) {
@@ -299,7 +283,7 @@ fn reconcile_and_update_predictions(
         }
 
         // Forward predict balls
-        for (mut transform, mut velocity, net_id) in set.p0().iter_mut() {
+        for (mut transform, mut velocity, net_id) in ball_query.iter_mut() {
             if i == 0 {
                 // rollback to most recent world state
                 if let Some(e) = most_recent_state.get_by_net_id(net_id) {
@@ -319,14 +303,15 @@ fn reconcile_and_update_predictions(
             );
         }
 
-        // This is gross. Make a copy of all the colliders to avoid borrow checker issues
-        // Not sure how to do this properly without splitting this operation into 2 systems
-        // for basically no reason?
-        let colliders: Vec<(Entity, Transform, Option<Brick>)> = collect_colliders(set.p2());
-
         // Perform collision detection
-        for (transform, mut velocity, _) in set.p0().iter_mut() {
-            check_single_ball_collision(&mut score, &colliders, &transform, &mut velocity, &mut entities_to_ignore);
+        for (transform, mut velocity, _) in ball_query.iter_mut() {
+            let colliders = paddle_query
+                .iter()
+                .map(|(e, t, _)| (e, t, None))
+                .chain(
+                    remaining_colliders.iter()
+                );
+            check_single_ball_collision(&mut score, colliders, &transform, &mut velocity, &mut entities_to_ignore);
         }
     }
 }
@@ -417,7 +402,6 @@ fn sync_net_ids_if_needed_and_update_score(
                 }
                 NetEntityType::Ball(d) => {
                     let bundle = BallBundle::new(meshes, materials, d.pos, net_ent.net_id, d.player_index);
-                    //Some(spawn_net_bundle(commands, bundle, NetBundleType::Interpolated)) // TODO: predict local balls
                     Some(spawn_net_bundle(commands, bundle, NetBundleType::Predicted))
                 }
                 NetEntityType::Score(d) => {
