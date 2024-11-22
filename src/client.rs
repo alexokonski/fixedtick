@@ -12,6 +12,7 @@ use bevy::{prelude::*};
 use bevy::utils::HashMap;
 use networking::{ClientPlugin, NetworkEvent, ResSocketAddr, ResUdpSocket, Transport};
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
+use bevy::ecs::query::{QueryData, QueryFilter};
 use byteorder::ByteOrder;
 use iyes_perf_ui::prelude::*;
 use crate::networking::NetworkSystem;
@@ -23,6 +24,113 @@ struct ClientWorldState {
     net_id_to_entity: HashMap<NetId, usize>,
     last_applied_input: u32,
     local_client_index: u8
+}
+
+#[derive(QueryData)]
+#[query_data(mutable)]
+struct BallQuery {
+    transform: &'static mut Transform,
+    velocity: &'static mut Velocity,
+    net_id: &'static NetId,
+}
+
+#[derive(QueryFilter)]
+struct BallFilter {
+    w0: With<LocallyPredicted>,
+    w1: With<Ball>,
+    w2: Without<Paddle>,
+    w3: Without<Brick>,
+}
+
+#[derive(QueryData)]
+#[query_data(mutable)]
+struct PaddleQuery {
+    entity: Entity,
+    transform: &'static mut Transform,
+    net_id: &'static NetId,
+}
+
+#[derive(QueryFilter)]
+struct PaddleFilter {
+    w0: With<LocallyPredicted>,
+    w1: With<Paddle>,
+    w2: With<Collider>,
+    w3: Without<Ball>,
+    w4: Without<Brick>,
+}
+
+#[derive(QueryData)]
+#[query_data(mutable)]
+struct RemainingCollidersQuery {
+    entity: Entity,
+    transform: &'static Transform,
+    brick: Option<&'static Brick>,
+}
+
+#[derive(QueryFilter)]
+struct RemainingCollidersFilter {
+    w0: With<Collider>,
+    w1: Without<Ball>,
+    w2: Without<Paddle>,
+}
+
+trait LocallyPredictedEntity {
+    fn transform(&self) -> &Transform;
+    fn rollback_to(&mut self, ws: &ClientWorldState) -> bool;
+
+    fn simulate_forward(&mut self, input: &PlayerInputData);
+}
+
+impl<'w> LocallyPredictedEntity for BallQueryItem<'w> {
+    fn transform(&self) -> &Transform {
+        &self.transform
+    }
+
+    fn rollback_to(&mut self, ws: &ClientWorldState) -> bool {
+        if let Some(e) = ws.get_by_net_id(self.net_id) {
+            match &e.entity_type {
+                NetEntityType::Ball(d) => {
+                    self.transform.translation = Vec3::from((d.pos, 1.0));
+                    *self.velocity = Velocity(d.velocity);
+                    true
+                },
+                _ => panic!("Unexpected entity type")
+            }
+        } else {
+            false
+        }
+    }
+
+    fn simulate_forward(&mut self, _input: &PlayerInputData) {
+        apply_velocity(
+            TICK_S as f32,
+            &mut self.transform,
+            &self.velocity
+        );
+    }
+}
+
+impl<'w> LocallyPredictedEntity for PaddleQueryItem<'w> {
+    fn transform(&self) -> &Transform {
+        &self.transform
+    }
+    fn rollback_to(&mut self, ws: &ClientWorldState) -> bool {
+        if let Some(e) = ws.get_by_net_id(self.net_id) {
+            match &e.entity_type {
+                NetEntityType::Paddle(d) => {
+                    self.transform.translation = Vec3::from((d.pos, 0.0));
+                    true
+                },
+                _ => panic!("Unexpected entity type")
+            }
+        } else {
+            false
+        }
+    }
+
+    fn simulate_forward(&mut self, input: &PlayerInputData) {
+        move_paddle(TICK_S as f32, &mut self.transform, input);
+    }
 }
 
 impl ClientWorldState {
@@ -164,7 +272,7 @@ fn connection_handler(
     mut events: EventReader<NetworkEvent>,
     mut world_states: ResMut<WorldStates>,
     mut ping_state: ResMut<PingState>,
-    mut unacked_inputs: ResMut<UnAckedPlayerInputs>,
+    //mut unacked_inputs: ResMut<UnAckedPlayerInputs>,
     time: Res<Time<Real>>,
 ) {
     //let mut recv_count = 0;
@@ -198,11 +306,6 @@ fn connection_handler(
                         match packet {
                             ServerToClientPacket::WorldState(ws) => {
                                 world_states.states.push_back(ClientWorldState::new(ws, last_applied_input, local_client_index));
-
-                                // Clear previous inputs
-                                let most_recent_input = world_states.states.back().unwrap().last_applied_input;
-                                unacked_inputs.inputs.retain(|input| input.sequence > most_recent_input);
-
                                 world_states.received_per_sec.push_back(time.elapsed_seconds())
                             },
                             ServerToClientPacket::Pong(pd) => {
@@ -244,11 +347,26 @@ fn apply_velocity(delta_secs: f32, transform: &mut Transform, velocity: &Velocit
     transform.translation.y += velocity.y * delta_secs;
 }
 
+fn rollback_all<T: LocallyPredictedEntity>(entities: impl Iterator<Item = T>, ws: &ClientWorldState) -> Vec<Transform> {
+    let mut original_transforms = Vec::new();
+    for mut e in entities {
+        original_transforms.push(e.transform().clone());
+        e.rollback_to(&ws);
+    }
+    original_transforms
+}
+
+fn resimulate_all<T: LocallyPredictedEntity>(entities: impl Iterator<Item = T>, input: &PlayerInputData) {
+    for mut e in entities {
+        e.simulate_forward(input);
+    }
+}
+
 fn reconcile_and_update_predictions(
-    mut ball_query: Query<(&mut Transform, &mut Velocity, &NetId), (With<LocallyPredicted>, With<Ball>, Without<Paddle>, Without<Brick>)>,
-    mut paddle_query: Query<(Entity, &mut Transform, &NetId), (With<LocallyPredicted>, With<Paddle>, With<Collider>, Without<Brick>, Without<Ball>)>,
-    remaining_colliders: Query<(Entity, &Transform, Option<&Brick>), (With<Collider>, Without<Ball>, Without<Paddle>)>,
-    unacked_inputs: ResMut<UnAckedPlayerInputs>,
+    mut ball_query: Query<BallQuery, BallFilter>,
+    mut paddle_query: Query<PaddleQuery, PaddleFilter>,
+    remaining_colliders: Query<RemainingCollidersQuery, RemainingCollidersFilter>,
+    mut unacked_inputs: ResMut<UnAckedPlayerInputs>,
     mut score: ResMut<Score>,
     world_states: Res<WorldStates>,
 ) {
@@ -256,62 +374,57 @@ fn reconcile_and_update_predictions(
         return;
     }
 
+    // Clear previous inputs
     let most_recent_state = world_states.states.back().unwrap();
+    let most_recent_input = most_recent_state.last_applied_input;
+    unacked_inputs.inputs.retain(|input| input.sequence > most_recent_input);
 
-    if unacked_inputs.inputs.is_empty() {
+    let inputs = &unacked_inputs.inputs;
+    if inputs.is_empty() {
         info!("NO UNACKED, RETURNING");
         return;
     }
 
+    // First, rollback and resimulate from the most recent world state to now
+    let original_paddle_transforms = rollback_all(paddle_query.iter_mut(), &most_recent_state);
+    let original_ball_transforms = rollback_all(ball_query.iter_mut(), &most_recent_state);
+
     let mut entities_to_ignore = Vec::new();
-    for i in 0..unacked_inputs.inputs.len() {
-        // Forward predict paddles
-        for (_, mut transform, net_id) in paddle_query.iter_mut() {
-            if i == 0 {
-                // rollback to most recent world state
-                if let Some(e) = most_recent_state.get_by_net_id(net_id) {
-                    match &e.entity_type {
-                        NetEntityType::Paddle(d) => {
-                            transform.translation = Vec3::from((d.pos, 0.0));
-                        },
-                        _ => panic!("Unexpected entity type")
-                    }
+    let last_idx = inputs.len() - 1;
+
+    // The last input hasn't been applied yet. Don't apply it here so we can detect mispredicts
+    for (i, input) in unacked_inputs.inputs.iter().enumerate() {
+        if i == last_idx {
+            // Print mispredicts. The last input in the list hasn't been predicted yet and is
+            // for this frame. So to detect mispredicts we need to compare to the state BEFORE
+            // that last input has been applied
+            for (i, p) in paddle_query.iter().enumerate() {
+                if *p.transform != original_paddle_transforms[i] {
+                    info!("PADDLE MISPREDICT (orginally {:?} now {:?}", original_paddle_transforms[i].translation, p.transform.translation);
                 }
             }
 
-            move_paddle(TICK_S as f32, &mut transform, &unacked_inputs.inputs[i]);
-        }
-
-        // Forward predict balls
-        for (mut transform, mut velocity, net_id) in ball_query.iter_mut() {
-            if i == 0 {
-                // rollback to most recent world state
-                if let Some(e) = most_recent_state.get_by_net_id(net_id) {
-                    match &e.entity_type {
-                        NetEntityType::Ball(d) => {
-                            transform.translation = Vec3::from((d.pos, 0.0));
-                            *velocity = Velocity(d.velocity);
-                        },
-                        _ => panic!("Unexpected entity type")
-                    }
+            for (i, b) in ball_query.iter().enumerate() {
+                if *b.transform != original_ball_transforms[i] {
+                    info!("BALL MISPREDICT (orginally {:?} now {:?}", original_ball_transforms[i].translation, b.transform.translation);
                 }
             }
-            apply_velocity(
-                TICK_S as f32,
-                &mut transform,
-                &velocity
-            );
         }
+        // Forward predict paddles and balls
+        resimulate_all(paddle_query.iter_mut(), input);
+        resimulate_all(ball_query.iter_mut(), input);
 
         // Perform collision detection
-        for (transform, mut velocity, _) in ball_query.iter_mut() {
+        for mut b in ball_query.iter_mut() {
             let colliders = paddle_query
                 .iter()
-                .map(|(e, t, _)| (e, t, None))
+                .map(|p| (p.entity, p.transform, None))
                 .chain(
-                    remaining_colliders.iter()
+                    remaining_colliders
+                        .iter()
+                        .map(|r| (r.entity, r.transform, r.brick))
                 );
-            check_single_ball_collision(&mut score, colliders, &transform, &mut velocity, &mut entities_to_ignore);
+            check_single_ball_collision(&mut score, colliders, &b.transform, &mut b.velocity, &mut entities_to_ignore);
         }
     }
 }
@@ -537,7 +650,7 @@ fn tick_simulation(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut score: ResMut<Score>,
     mut ping_state: ResMut<PingState>,
-    fixed_state: Res<FixedTickWorldResource>,
+    //fixed_state: Res<FixedTickWorldResource>,
     time: Res<Time<Real>>,
 ) {
     // Clear old entries from our stats
@@ -551,10 +664,10 @@ fn tick_simulation(
         }
     }
 
-    for pong in ping_state.pongs.clone().iter() {
+    /*for pong in ping_state.pongs.clone().iter() {
         let instant = ping_state.ping_id_to_instance.remove(&pong.ping_id).unwrap();
-        debug!("({}) {} ms raw pong for ping {}", fixed_state.frame_counter, instant.elapsed().as_millis(), pong.ping_id);
-    }
+        info!("({}) {} ms raw pong for ping {}", fixed_state.frame_counter, instant.elapsed().as_millis(), pong.ping_id);
+    }*/
     ping_state.pongs.clear();
 
     //if !world_states.received_per_sec.is_empty() {
@@ -563,7 +676,6 @@ fn tick_simulation(
         //let intervals: Vec<f32> = world_states.received_per_sec.iter().tuple_windows().map(|(&p,&c)| c - p).collect();
         //warn!("{} PPS, INTERVALS {:?}", world_states.received_per_sec.len(), intervals);
     //}
-
 
     if world_states.states.len() < 2 {
         debug!("STARVED {}!", world_states.states.len());

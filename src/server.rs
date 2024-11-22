@@ -405,7 +405,7 @@ fn process_input(
             last_consumed = input.data.sequence;
 
             if inputs.len() < BUFFER_LEN {
-                //info!("BREAK {} remaining in buffer, {} consumed", inputs.len(), num_consumed);
+                //info!("BREAK {}  in buffer, {} consumed", inputs.len(), num_consumed);
                 if num_consumed > 1 {
                     info!("{} consumed to catch up, {} remaining in buffer", num_consumed, inputs.len());
                 }
