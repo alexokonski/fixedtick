@@ -29,5 +29,7 @@ Snapnet blog: https://snapnet.dev/blog/
 
 Gaffer on games: https://www.gafferongames.com/
 
+'Overwatch' Gameplay Architecture and Netcode: https://gdcvault.com/play/1024001/-Overwatch-Gameplay-Architecture-and
+
 # Building
 `cargo build --bin client --bin server`
