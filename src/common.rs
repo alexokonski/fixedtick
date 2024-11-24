@@ -117,6 +117,7 @@ impl WallLocation {
         }
     }
 }
+
 impl WallBundle {
     // This "builder method" allows us to reuse logic across our wall entities,
     // making our code easier to read and less prone to bugs when we change the logic
@@ -323,7 +324,6 @@ pub fn check_single_ball_collision<'a>(
     }
 }
 
-
 pub const PADDLE_SPEED: f32 = 500.0;
 pub const PADDLE_PADDING: f32 = 10.0;
 pub const PADDLE_LEFT_BOUND: f32 = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING;
@@ -498,7 +498,7 @@ pub fn end_tick(
     debug!("tick time: {:?}", world_resource.tick_start.unwrap().elapsed());
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Copy)]
 pub struct SimLatencyArgs {
     #[arg(long, default_value_t = 0)]
     pub send_sim_latency_ms: u32,

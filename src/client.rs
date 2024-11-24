@@ -71,7 +71,7 @@ struct RemainingCollidersQuery {
 struct RemainingCollidersFilter {
     w0: With<Collider>,
     w1: Without<Ball>,
-    w2: Without<Paddle>,
+    w2: Without<LocallyPredicted>,
 }
 
 trait LocallyPredictedEntity {
@@ -178,12 +178,12 @@ struct PingState {
 #[derive(Resource, Default)]
 struct UnAckedPlayerInputs {
     inputs: VecDeque<PlayerInputData>,
-    //predicted_world_states: VecDeque<NetWorldStateData>
 }
 
-#[derive(Resource, Default)]
-struct NetIdToEntityId {
-    net_id_to_entity_id: HashMap<NetId, Entity>
+#[derive(Resource)]
+struct NetIdUtils {
+    net_id_to_entity_id: HashMap<NetId, Entity>,
+    args: Args
 }
 
 #[derive(Component, Default)]
@@ -205,7 +205,10 @@ struct Args {
     port: u16,
 
     #[command(flatten)]
-    sim_latency: SimLatencyArgs
+    sim_latency: SimLatencyArgs,
+
+    #[arg(long, default_value_t = false)]
+    disable_client_prediction: bool,
 }
 
 fn main() {
@@ -216,6 +219,10 @@ fn main() {
     //println!("local socket addr: {}", addr);
     let res_addr = ResSocketAddr(remote_addr);
     let sim_settings = args.sim_latency.into();
+    let net_utils = NetIdUtils {
+        net_id_to_entity_id: HashMap::new(),
+        args
+    };
 
     App::new()
         .insert_resource(bevy::winit::WinitSettings {
@@ -224,7 +231,7 @@ fn main() {
         })
         .insert_resource(res_addr)
         .insert_resource(socket)
-        .insert_resource(NetIdToEntityId::default())
+        .insert_resource(net_utils)
         .insert_resource(Time::<Fixed>::from_hz(TICK_RATE_HZ))
         .insert_resource(WorldStates::default())
         .insert_resource(Score(0))
@@ -364,7 +371,7 @@ fn resimulate_all<T: LocallyPredictedEntity>(entities: impl Iterator<Item = T>, 
 
 fn reconcile_and_update_predictions(
     mut ball_query: Query<BallQuery, BallFilter>,
-    mut paddle_query: Query<PaddleQuery, PaddleFilter>,
+    mut local_paddle_query: Query<PaddleQuery, PaddleFilter>,
     remaining_colliders: Query<RemainingCollidersQuery, RemainingCollidersFilter>,
     mut unacked_inputs: ResMut<UnAckedPlayerInputs>,
     mut score: ResMut<Score>,
@@ -386,7 +393,7 @@ fn reconcile_and_update_predictions(
     }
 
     // First, rollback and resimulate from the most recent world state to now
-    let original_paddle_transforms = rollback_all(paddle_query.iter_mut(), &most_recent_state);
+    let original_paddle_transforms = rollback_all(local_paddle_query.iter_mut(), &most_recent_state);
     let original_ball_transforms = rollback_all(ball_query.iter_mut(), &most_recent_state);
 
     let mut entities_to_ignore = Vec::new();
@@ -398,7 +405,7 @@ fn reconcile_and_update_predictions(
             // Print mispredicts. The last input in the list hasn't been predicted yet and is
             // for this frame. So to detect mispredicts we need to compare to the state BEFORE
             // that last input has been applied
-            for (i, p) in paddle_query.iter().enumerate() {
+            for (i, p) in local_paddle_query.iter().enumerate() {
                 if *p.transform != original_paddle_transforms[i] {
                     info!("PADDLE MISPREDICT (orginally {:?} now {:?}", original_paddle_transforms[i].translation, p.transform.translation);
                 }
@@ -411,12 +418,12 @@ fn reconcile_and_update_predictions(
             }
         }
         // Forward predict paddles and balls
-        resimulate_all(paddle_query.iter_mut(), input);
+        resimulate_all(local_paddle_query.iter_mut(), input);
         resimulate_all(ball_query.iter_mut(), input);
 
         // Perform collision detection
         for mut b in ball_query.iter_mut() {
-            let colliders = paddle_query
+            let colliders = local_paddle_query
                 .iter()
                 .map(|p| (p.entity, p.transform, None))
                 .chain(
@@ -489,25 +496,37 @@ fn sync_net_ids_if_needed_and_update_score(
     commands: &mut Commands,
     ws: &ClientWorldState,
     net_id_query: &Query<(Entity, &NetId)>,
-    net_id_map: &mut ResMut<NetIdToEntityId>,
+    net_id_util: &mut ResMut<NetIdUtils>,
     meshes: &mut Assets<Mesh>,
     score: &mut Score,
     materials: &mut Assets<ColorMaterial>
 ) {
     let mut ws_net_ids: Vec<NetId> = Vec::with_capacity(ws.world.entities.len());
 
-    let bt = |player_index: NetPlayerIndex| {
-        if player_index.0 == ws.local_client_index { NetBundleType::Predicted } else { NetBundleType::Interpolated }
+    let paddle_bt = |player_index: NetPlayerIndex, args: &Args| {
+        if args.disable_client_prediction == false && player_index.0 == ws.local_client_index {
+            NetBundleType::Predicted
+        } else {
+            NetBundleType::Interpolated
+        }
+    };
+
+    let ball_bt = |args: &Args| {
+        if args.disable_client_prediction == false {
+            NetBundleType::Predicted
+        } else {
+            NetBundleType::Interpolated
+        }
     };
 
     // First, any spawn new entities from this world state
     for net_ent in ws.world.entities.iter() {
         ws_net_ids.push(net_ent.net_id);
-        if !net_id_map.net_id_to_entity_id.contains_key(&net_ent.net_id) {
+        if !net_id_util.net_id_to_entity_id.contains_key(&net_ent.net_id) {
             let entity_id = match &net_ent.entity_type {
                 NetEntityType::Paddle(d) => {
                     let bundle = PaddleBundle::new(d.pos, net_ent.net_id, d.player_index);
-                    Some(spawn_net_bundle(commands, bundle, bt(d.player_index)))
+                    Some(spawn_net_bundle(commands, bundle, paddle_bt(d.player_index, &net_id_util.args)))
                 }
                 NetEntityType::Brick(d) => {
                     let bundle = BrickBundle::new(d.pos, net_ent.net_id);
@@ -515,7 +534,7 @@ fn sync_net_ids_if_needed_and_update_score(
                 }
                 NetEntityType::Ball(d) => {
                     let bundle = BallBundle::new(meshes, materials, d.pos, net_ent.net_id, d.player_index);
-                    Some(spawn_net_bundle(commands, bundle, NetBundleType::Predicted))
+                    Some(spawn_net_bundle(commands, bundle, ball_bt(&net_id_util.args)))
                 }
                 NetEntityType::Score(d) => {
                     // Feels gross to do this here, TODO: find a better spot
@@ -525,7 +544,7 @@ fn sync_net_ids_if_needed_and_update_score(
             };
 
             if let Some(entity_id) = entity_id {
-                net_id_map.net_id_to_entity_id.insert(net_ent.net_id, entity_id);
+                net_id_util.net_id_to_entity_id.insert(net_ent.net_id, entity_id);
             }
         }
     }
@@ -534,7 +553,7 @@ fn sync_net_ids_if_needed_and_update_score(
     for (entity, net_id) in net_id_query.iter() {
         if !ws_net_ids.contains(net_id) {
             commands.entity(entity).despawn();
-            net_id_map.net_id_to_entity_id.remove(net_id);
+            net_id_util.net_id_to_entity_id.remove(net_id);
         }
     }
 }
@@ -567,7 +586,7 @@ fn setup(
 
 fn apply_world_state(
     query: &mut Query<&mut InterpolatedTransform>,
-    net_id_map: &mut ResMut<NetIdToEntityId>,
+    net_id_map: &mut ResMut<NetIdUtils>,
     to_state: &ClientWorldState
 ) {
     for net_ent in to_state.world.entities.iter() {
@@ -645,7 +664,7 @@ fn tick_simulation(
     mut world_states: ResMut<WorldStates>,
     mut query: Query<&mut InterpolatedTransform>,
     net_id_query: Query<(Entity, &NetId)>,
-    mut net_id_map: ResMut<NetIdToEntityId>,
+    mut net_id_map: ResMut<NetIdUtils>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut score: ResMut<Score>,
@@ -756,7 +775,7 @@ fn update_map_and_apply_world_state(
     commands: &mut Commands,
     query: &mut Query<&mut InterpolatedTransform>,
     net_id_query: &Query<(Entity, &NetId)>,
-    net_id_map: &mut ResMut<NetIdToEntityId>,
+    net_id_map: &mut ResMut<NetIdUtils>,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<ColorMaterial>>,
     score: &mut ResMut<Score>,
