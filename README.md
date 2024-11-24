@@ -25,8 +25,9 @@ This model provides responsive input for the local player, at the cost of potent
 Because I wanted to learn the basics of various netcode models.
 
 # Reference
-https://snapnet.dev/blog/
-https://www.gafferongames.com/
+Snapnet blog: https://snapnet.dev/blog/
+
+Gaffer on games: https://www.gafferongames.com/
 
 # Building
 `cargo build --bin client --bin server`
