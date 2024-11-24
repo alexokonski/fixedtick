@@ -13,7 +13,7 @@ Clients also have the ability to simulate latency, and turn off prediction. Run 
 
 # How
 ### Basics
-Clients send only inputs up to the server. The server broadcasts world state down to clients. Both client and servers run at a fixed 60 hz, and send one packet per tick. The client interpolates between the two most recently received world states when rendering. This is commonly called a 'snapshot interpolation' model for synchronizing game state.
+Clients send only inputs up to the server. The server broadcasts world state down to clients. Both client and servers run at a fixed 60 hz. The client interpolates between the two most recently received world states when rendering. This is commonly called a 'snapshot interpolation' model for synchronizing game state.
 
 ### Client prediction
 In order to mitigate latency, by default the client predicts both its local paddle and all ball physics. When receiving world states, the local paddle and all balls are rolled back to that state and forward predicted for each un-acknowledged input. This process is commonly called 'rollback'. In many shooters, this is done for the local player. In some games (like rocket league) it is done for all players.
@@ -30,6 +30,8 @@ Snapnet blog: https://snapnet.dev/blog/
 Gaffer on games: https://www.gafferongames.com/
 
 'Overwatch' Gameplay Architecture and Netcode: https://gdcvault.com/play/1024001/-Overwatch-Gameplay-Architecture-and
+
+bevy engine: https://bevyengine.org/
 
 # Building
 `cargo build --bin client --bin server`
