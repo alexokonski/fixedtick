@@ -9,7 +9,7 @@ use crate::networking::ResSocketAddr;
 
 use super::{events::NetworkEvent, transport::Transport, NetworkResource, SimLatencyReceiveQueue};
 
-fn send_with_sim_latency(
+fn recv_with_sim_latency(
     receive_setting: &SimLatencySetting,
     events: &mut EventWriter<NetworkEvent>,
     queue: &mut SimLatencyReceiveQueue,
@@ -67,7 +67,7 @@ pub fn client_recv_packet_system(
                 }
 
                 //debug!("{:?} received payload {:?} from {}", time::Instant::now() payload, address);
-                send_with_sim_latency(
+                recv_with_sim_latency(
                     &sim_settings.receive,
                     &mut events,
                     &mut queue,
@@ -78,7 +78,7 @@ pub fn client_recv_packet_system(
             Err(e) => {
                 if e.kind() != io::ErrorKind::WouldBlock {
                     //events.send(NetworkEvent::RecvError(e));
-                    send_with_sim_latency(
+                    recv_with_sim_latency(
                         &sim_settings.receive,
                         &mut events,
                         &mut queue,
@@ -115,7 +115,7 @@ pub fn server_recv_packet_system(
                 {
                     // connection established
                     //events.send(NetworkEvent::Connected(address));
-                    send_with_sim_latency(
+                    recv_with_sim_latency(
                         &sim_settings.receive,
                         &mut events,
                         &mut queue,
@@ -130,7 +130,7 @@ pub fn server_recv_packet_system(
                 let now = time::Instant::now();
                 let msg = NetworkEvent::Message(address, payload, now);
                 //debug!("{:?} received payload {:?} from {}", now, payload, address);
-                send_with_sim_latency(
+                recv_with_sim_latency(
                     &sim_settings.receive,
                     &mut events,
                     &mut queue,
@@ -139,7 +139,7 @@ pub fn server_recv_packet_system(
             }
             Err(e) => {
                 if e.kind() != io::ErrorKind::WouldBlock {
-                    send_with_sim_latency(
+                    recv_with_sim_latency(
                         &sim_settings.receive,
                         &mut events,
                         &mut queue,
