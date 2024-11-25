@@ -361,3 +361,17 @@ pub fn apply_world_state(
         }
     }
 }
+
+pub fn update_map_and_apply_world_state(
+    commands: &mut Commands,
+    query: &mut Query<&mut InterpolatedTransform>,
+    net_id_query: &Query<(Entity, &NetId)>,
+    net_id_map: &mut ResMut<NetIdUtils>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<ColorMaterial>>,
+    score: &mut ResMut<Score>,
+    to_state: &ClientWorldState
+) {
+    sync_net_ids_if_needed_and_update_score(commands, to_state, net_id_query, net_id_map, meshes, score, materials);
+    apply_world_state(query, net_id_map, to_state);
+}
