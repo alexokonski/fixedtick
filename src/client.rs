@@ -2,6 +2,8 @@ mod networking;
 mod common;
 mod client_types;
 
+mod client_util;
+
 use clap::Parser;
 use common::*;
 
@@ -16,6 +18,7 @@ use byteorder::ByteOrder;
 use iyes_perf_ui::prelude::*;
 use crate::networking::NetworkSystem;
 use crate::client_types::*;
+use crate::client_util::*;
 
 
 fn main() {
@@ -190,17 +193,7 @@ fn reconcile_and_update_predictions(
             // Print mispredicts. The last input in the list hasn't been predicted yet and is
             // for this frame. So to detect mispredicts we need to compare to the state BEFORE
             // that last input has been applied
-            for (i, p) in local_paddle_query.iter().enumerate() {
-                if *p.transform != original_paddle_transforms[i] {
-                    info!("PADDLE MISPREDICT (orginally {:?} now {:?}", original_paddle_transforms[i].translation, p.transform.translation);
-                }
-            }
-
-            for (i, b) in ball_query.iter().enumerate() {
-                if *b.transform != original_ball_transforms[i] {
-                    info!("BALL MISPREDICT (orginally {:?} now {:?}", original_ball_transforms[i].translation, b.transform.translation);
-                }
-            }
+            detect_mispredicts(&ball_query, &local_paddle_query, &original_paddle_transforms, &original_ball_transforms);
         }
 
         // Forward predict paddles and balls

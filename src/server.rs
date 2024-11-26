@@ -1,11 +1,11 @@
 use clap::Parser;
 mod networking;
 mod server_types;
-use crate::server_types::*;
+mod server_util;
 mod common;
+
 use common::*;
 use std::time;
-use std::net::SocketAddr;
 use bevy::prelude::*;
 use bincode;
 use bincode::config;
@@ -16,6 +16,9 @@ use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::SeedableRng;
 use crate::networking::NetworkSystem;
 use byteorder::ByteOrder;
+
+use crate::server_types::*;
+use crate::server_util::*;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -61,7 +64,7 @@ fn main() {
                 networking::systems::idle_timeout_system.in_set(networking::ServerSystem::IdleTimeout),
                 connection_handler,
                 process_input,
-                apply_velocity,
+                apply_velocity_system,
                 check_for_collisions,
                 update_scoreboard,
                 broadcast_world_state,
@@ -239,29 +242,6 @@ fn connection_handler(
     debug!("{} inputs processed!", num_inputs_processed);
 }
 
-fn handle_client_disconnected(
-    handle: &SocketAddr,
-    commands: &mut Commands,
-    client_query:
-    &mut Query<(&mut NetConnection, &mut NetInput)>,
-    connections: &mut ResMut<NetConnections>,
-) {
-    if connections.addr_to_entity.contains_key(handle) {
-        let id = connections.addr_to_entity.get(handle).unwrap();
-        let conn = client_query.get(*id).unwrap().0;
-        commands.entity(conn.paddle_entity).despawn();
-        commands.entity(conn.ball_entity).despawn();
-        commands.entity(*id).despawn();
-        connections.addr_to_entity.remove(handle);
-    }
-}
-
-fn write_header(buf: &mut [u8], conn: &NetConnection) {
-    byteorder::NetworkEndian::write_u32(buf, WORLD_PACKET_HEADER_TAG);
-    byteorder::NetworkEndian::write_u32(&mut buf[size_of::<u32>()..], conn.last_applied_input);
-    buf[size_of::<u32>() * 2] = conn.player_index;
-}
-
 fn broadcast_world_state(
     bricks: Query<(&Transform, &NetId), With<Brick>>,
     balls: Query<(&Transform, &NetId, &Velocity, &NetPlayerIndex) , With<Ball>>,
@@ -306,12 +286,12 @@ fn broadcast_world_state(
         net_id: NetId(0) // Singleton entity
     });
 
-    // Will just blow up if world state gets to big, fine by me right now
     let packet = ServerToClientPacket::WorldState(world);
     let mut world_state_buf = [0; networking::ETHERNET_MTU];
     byteorder::NetworkEndian::write_u32(&mut world_state_buf, WORLD_PACKET_HEADER_TAG);
     // A U32 HERE will be the only one changed, min serialization overhead
 
+    // Will just blow up if world state gets to big, fine by me right now
     let num_bytes = HEADER_LEN + bincode::serde::encode_into_slice(packet, &mut world_state_buf[HEADER_LEN..], config::standard()).unwrap();
 
     for (conn, mut input) in client_query.iter_mut() {
@@ -335,7 +315,7 @@ fn broadcast_world_state(
     }
 }
 
-fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time<Fixed>>) {
+fn apply_velocity_system(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time<Fixed>>) {
     for (mut transform, velocity) in &mut query {
         transform.translation.x += velocity.x * time.delta_seconds();
         transform.translation.y += velocity.y * time.delta_seconds();
