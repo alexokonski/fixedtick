@@ -18,7 +18,7 @@ use crate::networking::NetworkSystem;
 use byteorder::ByteOrder;
 
 use crate::server_types::*;
-use crate::server_util::*;
+use crate::server_util as util;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -175,7 +175,7 @@ fn connection_handler(
             }
             NetworkEvent::Disconnected(handle) => {
                 info!("{}: disconnected!", handle);
-                handle_client_disconnected(
+                util::handle_client_disconnected(
                     handle,
                     &mut commands,
                     &mut client_query,
@@ -222,7 +222,7 @@ fn connection_handler(
                 //info!("{} sent a message: {:?}", handle, msg);
             }
             NetworkEvent::SendError(handle, err, msg) => {
-                handle_client_disconnected(
+                util::handle_client_disconnected(
                     handle,
                     &mut commands,
                     &mut client_query,
@@ -301,7 +301,7 @@ fn broadcast_world_state(
         transport.send(conn.addr, &world_state_buf[..num_bytes]);
 
         let mut ping_buf = [0; networking::ETHERNET_MTU];
-        write_header(&mut ping_buf, conn);
+        util::write_header(&mut ping_buf, conn);
 
         for ping in &input.pings {
             let packet = ServerToClientPacket::Pong(ping.clone());

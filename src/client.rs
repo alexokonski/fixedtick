@@ -18,8 +18,7 @@ use byteorder::ByteOrder;
 use iyes_perf_ui::prelude::*;
 use crate::networking::NetworkSystem;
 use crate::client_types::*;
-use crate::client_util::*;
-
+use crate::client_util as util;
 
 fn main() {
     let args = Args::parse();
@@ -182,8 +181,8 @@ fn reconcile_and_update_predictions(
     }
 
     // First, rollback and resimulate from the most recent world state to now
-    let original_paddle_transforms = rollback_all(local_paddle_query.iter_mut(), &most_recent_state);
-    let original_ball_transforms = rollback_all(ball_query.iter_mut(), &most_recent_state);
+    let original_paddle_transforms = util::rollback_all(local_paddle_query.iter_mut(), &most_recent_state);
+    let original_ball_transforms = util::rollback_all(ball_query.iter_mut(), &most_recent_state);
 
     let mut entities_to_ignore = Vec::new();
     let last_idx = inputs.len() - 1;
@@ -193,12 +192,17 @@ fn reconcile_and_update_predictions(
             // Print mispredicts. The last input in the list hasn't been predicted yet and is
             // for this frame. So to detect mispredicts we need to compare to the state BEFORE
             // that last input has been applied
-            detect_mispredicts(&ball_query, &local_paddle_query, &original_paddle_transforms, &original_ball_transforms);
+            util::detect_mispredicts(
+                &ball_query,
+                &local_paddle_query,
+                &original_paddle_transforms,
+                &original_ball_transforms
+            );
         }
 
         // Forward predict paddles and balls
-        resimulate_all(local_paddle_query.iter_mut(), input);
-        resimulate_all(ball_query.iter_mut(), input);
+        util::resimulate_all(local_paddle_query.iter_mut(), input);
+        util::resimulate_all(ball_query.iter_mut(), input);
 
         // Perform collision detection on predicted objects
         for mut b in ball_query.iter_mut() {
@@ -384,7 +388,7 @@ fn tick_simulation(
 
     if bootstrap_first_state {
         let from_state = &world_states.states[0];
-        update_map_and_apply_world_state(
+        util::update_map_and_apply_world_state(
             &mut commands,
             &mut query,
             &net_id_query,
@@ -396,7 +400,7 @@ fn tick_simulation(
         world_states.interpolating_from = Some(from_state.world.frame);
 
         let to_state = &world_states.states[1];
-        update_map_and_apply_world_state(
+        util::update_map_and_apply_world_state(
             &mut commands,
             &mut query,
             &net_id_query,
@@ -408,7 +412,7 @@ fn tick_simulation(
         world_states.interpolating_to = Some(to_state.world.frame);
     } else {
         let to_state = &world_states.states[0];
-        update_map_and_apply_world_state(
+        util::update_map_and_apply_world_state(
             &mut commands,
             &mut query,
             &net_id_query,

@@ -9,7 +9,7 @@ pub fn apply_velocity(delta_secs: f32, transform: &mut Transform, velocity: &Vel
 }
 
 pub fn rollback_all<T: LocallyPredictedEntity>(entities: impl Iterator<Item = T>, ws: &ClientWorldState) -> Vec<Transform> {
-    let mut original_transforms = Vec::new();
+    let mut original_transforms = Vec::with_capacity(entities.size_hint().0);
     for mut e in entities {
         original_transforms.push(e.transform().clone());
         e.rollback_to(&ws);
@@ -22,7 +22,6 @@ pub fn resimulate_all<T: LocallyPredictedEntity>(entities: impl Iterator<Item = 
         e.simulate_forward(input);
     }
 }
-
 
 pub fn spawn_net_bundle<B: Bundle>(commands: &mut Commands, bundle: B, net_type: NetBundleType) -> Entity {
     match net_type {
@@ -54,7 +53,7 @@ pub fn detect_mispredicts(
     }
 }
 
-pub fn sync_net_ids_if_needed_and_update_score(
+pub fn sync_net_ids_and_update_score(
     commands: &mut Commands,
     ws: &ClientWorldState,
     net_id_query: &Query<(Entity, &NetId)>,
@@ -81,7 +80,7 @@ pub fn sync_net_ids_if_needed_and_update_score(
         }
     };
 
-    // First, any spawn new entities from this world state
+    // First, any spawn new entities from this world state that don't exist in-world yet
     for net_ent in ws.world.entities.iter() {
         ws_net_ids.push(net_ent.net_id);
         if !net_id_util.net_id_to_entity_id.contains_key(&net_ent.net_id) {
@@ -120,21 +119,6 @@ pub fn sync_net_ids_if_needed_and_update_score(
     }
 }
 
-fn set_transform_from_net_entity(net_ent: &NetEntity, transform: &mut Transform) {
-    match &net_ent.entity_type {
-        NetEntityType::Paddle(d) => {
-            transform.translation = d.pos.extend(0.0);
-        }
-        NetEntityType::Brick(d) => {
-            transform.translation = d.pos.extend(0.0);
-        }
-        NetEntityType::Ball(d) => {
-            transform.translation = d.pos.extend(1.0);
-        }
-        NetEntityType::Score(_) => {}
-    }
-}
-
 pub fn apply_world_state(
     query: &mut Query<&mut InterpolatedTransform>,
     net_id_map: &mut ResMut<NetIdUtils>,
@@ -142,10 +126,11 @@ pub fn apply_world_state(
 ) {
     for net_ent in to_state.world.entities.iter() {
         if let Some(entity) = net_id_map.net_id_to_entity_id.get(&net_ent.net_id) {
-            if query.contains(*entity) {
-                let mut interp_transform = query.get_mut(*entity).unwrap();
+            if let Ok(mut interp_transform) = query.get_mut(*entity) {
                 interp_transform.from = interp_transform.to;
-                set_transform_from_net_entity(&net_ent, &mut interp_transform.to);
+                if let Some(pos) = net_ent.pos() {
+                    interp_transform.to.translation = pos;
+                }
             }
         }
     }
@@ -161,7 +146,7 @@ pub fn update_map_and_apply_world_state(
     score: &mut ResMut<Score>,
     to_state: &ClientWorldState
 ) {
-    sync_net_ids_if_needed_and_update_score(commands, to_state, net_id_query, net_id_map, meshes, score, materials);
+    sync_net_ids_and_update_score(commands, to_state, net_id_query, net_id_map, meshes, score, materials);
     apply_world_state(query, net_id_map, to_state);
 }
 

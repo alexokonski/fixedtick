@@ -219,6 +219,18 @@ pub struct NetEntity {
     pub net_id: NetId,
 }
 
+#[allow(dead_code)]
+impl NetEntity{
+    pub fn pos(&self) -> Option<Vec3> {
+        match &self.entity_type{
+            NetEntityType::Paddle(d) => Some(d.pos.extend(0.0)),
+            NetEntityType::Brick(d) => Some(d.pos.extend(0.0)),
+            NetEntityType::Ball(d) => Some(d.pos.extend(1.0)),
+            NetEntityType::Score(_) => None
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Default)]
 pub struct NetWorldStateData {
     pub frame: u32,
